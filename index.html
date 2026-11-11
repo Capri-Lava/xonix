@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Xonix">
+<meta name="theme-color" content="#05080f">
+<title>Xonix</title>
+<style>
+  :root {
+    --bg: #05080f;
+    --sea: #0a1020;
+    --land: #19b8b0;
+    --trail: #ff4fa3;
+    --player: #ffe94a;
+    --text: #d8e6f0;
+    --dim: #6f8496;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    overflow: hidden; overscroll-behavior: none;
+    touch-action: none; user-select: none; -webkit-user-select: none;
+    -webkit-touch-callout: none;
+  }
+  #app {
+    position: fixed; inset: 0; display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+             env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  #hud {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; align-items: center;
+    padding: 8px 14px 4px; font-size: 14px; letter-spacing: .04em;
+  }
+  #hud .mid { text-align: center; }
+  #hud .right { text-align: right; }
+  #hud b { color: #fff; font-weight: 700; }
+  #lives { color: var(--trail); letter-spacing: .15em; }
+  #bar {
+    position: relative; height: 8px; margin: 2px 14px 8px;
+    background: var(--sea); border-radius: 4px; overflow: hidden;
+  }
+  #barFill { height: 100%; width: 0; background: var(--land); transition: width .15s; }
+  #barMark { position: absolute; top: 0; bottom: 0; left: 75%; width: 2px; background: #fff; opacity: .8; }
+  #stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; position: relative; }
+  canvas { display: block; image-rendering: pixelated; }
+  #overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    background: rgba(5, 8, 15, .82); padding: 24px; gap: 14px;
+  }
+  #overlay.hidden { display: none; }
+  #overlay h1 { margin: 0; font-size: 44px; letter-spacing: .18em; color: var(--land); }
+  #overlay p { margin: 0; max-width: 300px; line-height: 1.5; font-size: 14px; color: var(--text); }
+  #overlay .dim { color: var(--dim); font-size: 12px; }
+  #overlay .cta { margin-top: 10px; color: var(--player); font-size: 16px; animation: blink 1.2s infinite; }
+  @keyframes blink { 50% { opacity: .35; } }
+  #hint { text-align: center; font-size: 11px; color: var(--dim); padding: 6px 0 8px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hud">
+    <div>POZIOM <b id="level">1</b></div>
+    <div class="mid"><span id="lives">♥♥♥</span></div>
+    <div class="right"><b id="score">0</b></div>
+  </div>
+  <div id="bar"><div id="barFill"></div><div id="barMark"></div></div>
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div id="overlay">
+      <h1>XONIX</h1>
+      <p id="msg">Przesuń palcem, żeby ruszyć. Wypłyń na ciemne pole, narysuj linię i wróć na brzeg, żeby odciąć teren. Zajmij 75% planszy.</p>
+      <p class="dim" id="sub">Kulka nie może dotknąć linii, zanim ją zamkniesz. Stuknięcie zatrzymuje Cię na brzegu.</p>
+      <div class="cta" id="cta">DOTKNIJ, ABY ZACZĄĆ</div>
+    </div>
+  </div>
+  <div id="hint">przesunięcie = kierunek · stuknięcie = stop</div>
+</div>
+
+<script id="sim">
+// ---------------------------------------------------------------------------
+// Symulacja (bez DOM). Stan gry trzyma listę graczy, żeby później dołożyć
+// kooperację: host liczy symulację, drugi telefon przysyła tylko kierunki.
+// ---------------------------------------------------------------------------
+const COLS = 36, ROWS = 60, BORDER = 2;
+const SEA = 0, LAND = 1, TRAIL = 2;
+const TARGET = 0.75;
+const TICK_MS = 70;
+
+function idx(x, y) { return y * COLS + x; }
+
+function newGame() {
+  const g = { level: 1, lives: 3, score: 0, state: 'play', wait: 0, players: [] };
+  startLevel(g);
+  return g;
+}
+
+function homeOf(i, n) {
+  // pozycje startowe na górnym brzegu, rozłożone równo
+  return { x: Math.round(COLS * (i + 1) / (n + 1)), y: 0 };
+}
+
+function startLevel(g, nPlayers) {
+  const n = nPlayers || g.players.length || 1;
+  g.grid = new Uint8Array(COLS * ROWS);
+  for (let y = 0; y < ROWS; y++)
+    for (let x = 0; x < COLS; x++)
+      if (x < BORDER || y < BORDER || x >= COLS - BORDER || y >= ROWS - BORDER)
+        g.grid[idx(x, y)] = LAND;
+  g.seaTotal = (COLS - 2 * BORDER) * (ROWS - 2 * BORDER);
+  g.filled = 0;
+  g.players = [];
+  for (let i = 0; i < n; i++) {
+    const h = homeOf(i, n);
+    g.players.push({ x: h.x, y: h.y, px: h.x, py: h.y, dx: 0, dy: 0, want: null, inSea: false });
+  }
+  g.balls = [];
+  const nBalls = g.level + 1;
+  for (let i = 0; i < nBalls; i++) {
+    const x = BORDER + 3 + Math.floor(Math.random() * (COLS - 2 * BORDER - 6));
+    const y = BORDER + 10 + Math.floor(Math.random() * (ROWS - 2 * BORDER - 14));
+    g.balls.push({ x, y, px: x, py: y, dx: Math.random() < .5 ? 1 : -1, dy: Math.random() < .5 ? 1 : -1 });
+  }
+  g.crawlers = [];
+  const nCrawl = 1 + Math.floor((g.level - 1) / 3);
+  for (let i = 0; i < nCrawl; i++) {
+    const x = 4 + Math.floor(Math.random() * (COLS - 8));
+    const y = ROWS - 1;
+    g.crawlers.push({ x, y, px: x, py: y, dx: Math.random() < .5 ? 1 : -1, dy: -1 });
+  }
+  g.safe = 15;
+  g.state = 'play';
+}
+
+function setWant(g, pi, dir) {
+  // dir: 'up' | 'down' | 'left' | 'right' | 'stop'
+  const p = g.players[pi];
+  if (p) p.want = dir;
+}
+
+const DIRS = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
+
+function step(g) {
+  for (const p of g.players) { p.px = p.x; p.py = p.y; }
+  for (const b of g.balls) { b.px = b.x; b.py = b.y; }
+  for (const c of g.crawlers) { c.px = c.x; c.py = c.y; }
+
+  if (g.state === 'dead' || g.state === 'levelup') {
+    if (--g.wait <= 0) {
+      if (g.state === 'levelup') { g.level++; startLevel(g); }
+      else g.state = 'play';
+    }
+    return;
+  }
+  if (g.state !== 'play') return;
+  if (g.safe > 0) g.safe--;
+
+  let died = false;
+  for (const p of g.players) if (stepPlayer(g, p)) died = true;
+  if (g.state !== 'play') return; // poziom ukończony
+  for (const b of g.balls) if (stepBall(g, b)) died = true;
+  for (const c of g.crawlers) stepCrawler(g, c);
+
+  for (const p of g.players) {
+    for (const b of g.balls) if (b.x === p.x && b.y === p.y) died = true;
+    if (g.safe <= 0)
+      for (const c of g.crawlers) if (c.x === p.x && c.y === p.y) died = true;
+  }
+  if (died) die(g);
+}
+
+function stepPlayer(g, p) {
+  if (p.want) {
+    if (p.want === 'stop') { if (!p.inSea) { p.dx = 0; p.dy = 0; } }
+    else {
+      const d = DIRS[p.want];
+      const reverse = d[0] === -p.dx && d[1] === -p.dy && (p.dx || p.dy);
+      if (!(p.inSea && reverse)) { p.dx = d[0]; p.dy = d[1]; }
+    }
+    p.want = null;
+  }
+  if (!p.dx && !p.dy) return false;
+  const nx = p.x + p.dx, ny = p.y + p.dy;
+  if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) { p.dx = 0; p.dy = 0; return false; }
+  const c = g.grid[idx(nx, ny)];
+  if (c === TRAIL) return true; // wjazd we własną (lub cudzą) linię
+  p.x = nx; p.y = ny;
+  if (c === SEA) { g.grid[idx(nx, ny)] = TRAIL; p.inSea = true; }
+  else if (p.inSea) {
+    p.inSea = false; p.dx = 0; p.dy = 0;
+    closeTrails(g);
+  }
+  return false;
+}
+
+function stepBall(g, b) {
+  const G = g.grid;
+  const hx = G[idx(b.x + b.dx, b.y)], hy = G[idx(b.x, b.y + b.dy)];
+  if (hx === TRAIL || hy === TRAIL) return true;
+  if (hx === LAND) b.dx = -b.dx;
+  if (hy === LAND) b.dy = -b.dy;
+  let t = G[idx(b.x + b.dx, b.y + b.dy)];
+  if (t === LAND) { b.dx = -b.dx; b.dy = -b.dy; t = G[idx(b.x + b.dx, b.y + b.dy)]; }
+  if (t === TRAIL) return true;
+  if (t === LAND) return false; // zakleszczona w kieszonce 1×1
+  b.x += b.dx; b.y += b.dy;
+  return false;
+}
+
+function stepCrawler(g, c) {
+  const ok = (x, y) => x >= 0 && y >= 0 && x < COLS && y < ROWS && g.grid[idx(x, y)] === LAND;
+  if (!ok(c.x + c.dx, c.y)) c.dx = -c.dx;
+  if (!ok(c.x, c.y + c.dy)) c.dy = -c.dy;
+  if (!ok(c.x + c.dx, c.y + c.dy)) { c.dx = -c.dx; c.dy = -c.dy; }
+  if (!ok(c.x + c.dx, c.y + c.dy)) return;
+  c.x += c.dx; c.y += c.dy;
+}
+
+function closeTrails(g) {
+  const G = g.grid;
+  // Linie graczy, którzy wciąż są na morzu, zostają (ważne w kooperacji).
+  const keep = new Uint8Array(G.length);
+  for (const p of g.players) if (p.inSea) markTrail(G, keep, p.x, p.y);
+  let gained = 0;
+  for (let i = 0; i < G.length; i++)
+    if (G[i] === TRAIL && !keep[i]) { G[i] = LAND; gained++; }
+  // Zalewamy od kulek: co nieosiągalne, staje się lądem.
+  const seen = new Uint8Array(G.length);
+  const stack = [];
+  for (const b of g.balls) stack.push(idx(b.x, b.y));
+  while (stack.length) {
+    const i = stack.pop();
+    if (seen[i] || G[i] === LAND) continue;
+    seen[i] = 1;
+    stack.push(i - 1, i + 1, i - COLS, i + COLS);
+  }
+  for (let i = 0; i < G.length; i++)
+    if (G[i] === SEA && !seen[i]) { G[i] = LAND; gained++; }
+  g.filled += gained;
+  g.score += gained * (gained > 150 ? 3 : gained > 50 ? 2 : 1);
+  if (g.filled / g.seaTotal >= TARGET) {
+    g.score += 500 * g.level;
+    g.state = 'levelup'; g.wait = 20;
+  }
+}
+
+function markTrail(G, keep, x, y) {
+  const stack = [idx(x, y)];
+  while (stack.length) {
+    const i = stack.pop();
+    if (keep[i] || G[i] !== TRAIL) continue;
+    keep[i] = 1;
+    stack.push(i - 1, i + 1, i - COLS, i + COLS);
+  }
+}
+
+function die(g) {
+  g.lives--;
+  for (let i = 0; i < g.grid.length; i++) if (g.grid[i] === TRAIL) g.grid[i] = SEA;
+  const n = g.players.length;
+  g.players.forEach((p, i) => {
+    const h = homeOf(i, n);
+    p.x = p.px = h.x; p.y = p.py = h.y; p.dx = p.dy = 0; p.want = null; p.inSea = false;
+  });
+  g.safe = 25;
+  if (g.lives <= 0) g.state = 'over';
+  else { g.state = 'dead'; g.wait = 10; }
+}
+
+function percent(g) { return g.filled / g.seaTotal; }
+</script>
+
+<script>
+// ---------------------------------------------------------------------------
+// Interfejs: rysowanie, dotyk, pętla gry
+// ---------------------------------------------------------------------------
+(function () {
+  const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+  const stage = document.getElementById('stage');
+  const overlay = document.getElementById('overlay');
+  const el = id => document.getElementById(id);
+  const COLORS = { sea: '#0a1020', land: '#19b8b0', landEdge: '#127f7a', trail: '#ff4fa3',
+                   ball: '#ffffff', crawler: '#ffb020', players: ['#ffe94a', '#7dff6a'] };
+
+  let g = newGame();
+  let mode = 'menu';          // menu | run | paused | over
+  let cell = 10, acc = 0, last = 0, flash = 0;
+  const ME = 0;               // indeks lokalnego gracza
+
+  let best = 0;
+  try { best = +localStorage.getItem('xonix.best') || 0; } catch (e) {}
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = stage.clientWidth, h = stage.clientHeight;
+    cell = Math.max(2, Math.floor(Math.min(w * dpr / COLS, h * dpr / ROWS)));
+    cv.width = cell * COLS; cv.height = cell * ROWS;
+    cv.style.width = cv.width / dpr + 'px';
+    cv.style.height = cv.height / dpr + 'px';
+    draw(1);
+  }
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+
+  function show(title, msg, sub, cta) {
+    overlay.querySelector('h1').textContent = title;
+    el('msg').textContent = msg; el('sub').textContent = sub; el('cta').textContent = cta;
+    overlay.classList.remove('hidden');
+  }
+
+  function hud() {
+    el('level').textContent = g.level;
+    el('lives').textContent = '♥'.repeat(Math.max(0, g.lives)) || '–';
+    el('score').textContent = g.score;
+    el('barFill').style.width = Math.min(100, percent(g) * 100) + '%';
+  }
+
+  function draw(a) {
+    const G = g.grid, c = cell;
+    ctx.fillStyle = COLORS.sea; ctx.fillRect(0, 0, cv.width, cv.height);
+    for (let y = 0; y < ROWS; y++) {
+      let x = 0;
+      while (x < COLS) {
+        const v = G[y * COLS + x];
+        if (v === SEA) { x++; continue; }
+        let x2 = x; while (x2 < COLS && G[y * COLS + x2] === v) x2++;
+        ctx.fillStyle = v === LAND ? COLORS.land : COLORS.trail;
+        ctx.fillRect(x * c, y * c, (x2 - x) * c, c);
+        x = x2;
+      }
+    }
+    const lerp = (p, q) => p + (q - p) * a;
+    for (const b of g.balls) {
+      ctx.fillStyle = COLORS.ball; ctx.beginPath();
+      ctx.arc((lerp(b.px, b.x) + .5) * c, (lerp(b.py, b.y) + .5) * c, c * .5, 0, 6.2832); ctx.fill();
+    }
+    for (const k of g.crawlers) {
+      const x = (lerp(k.px, k.x) + .5) * c, y = (lerp(k.py, k.y) + .5) * c, r = c * .62;
+      ctx.fillStyle = COLORS.crawler; ctx.beginPath();
+      ctx.moveTo(x, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r, y); ctx.fill();
+      ctx.fillStyle = '#000'; ctx.fillRect(x - c * .12, y - c * .12, c * .24, c * .24);
+    }
+    g.players.forEach((p, i) => {
+      const x = lerp(p.px, p.x) * c, y = lerp(p.py, p.y) * c, m = c * .25;
+      ctx.fillStyle = '#000'; ctx.fillRect(x - m, y - m, c + 2 * m, c + 2 * m);
+      ctx.fillStyle = COLORS.players[i % 2]; ctx.fillRect(x - m + 2, y - m + 2, c + 2 * m - 4, c + 2 * m - 4);
+    });
+    if (flash > 0) {
+      ctx.fillStyle = 'rgba(255,60,90,' + (flash / 12 * .45) + ')';
+      ctx.fillRect(0, 0, cv.width, cv.height);
+    }
+  }
+
+  function frame(t) {
+    requestAnimationFrame(frame);
+    const dt = Math.min(250, t - (last || t)); last = t;
+    if (mode !== 'run') { draw(1); return; }
+    acc += dt;
+    while (acc >= TICK_MS) {
+      acc -= TICK_MS;
+      const livesBefore = g.lives, levelBefore = g.level;
+      step(g);
+      if (flash > 0) flash--;
+      if (g.lives < livesBefore) flash = 12;
+      if (g.level !== levelBefore || g.lives !== livesBefore) hud();
+      if (g.state === 'over') { gameOver(); break; }
+    }
+    hud();
+    draw(g.state === 'play' ? acc / TICK_MS : 1);
+  }
+
+  function gameOver() {
+    mode = 'over';
+    const record = g.score > best;
+    if (record) { best = g.score; try { localStorage.setItem('xonix.best', best); } catch (e) {} }
+    show('KONIEC', 'Wynik: ' + g.score + ' · poziom ' + g.level,
+         record ? 'Nowy rekord!' : 'Rekord: ' + best, 'DOTKNIJ, ABY ZAGRAĆ PONOWNIE');
+    overAt = performance.now();
+  }
+  let overAt = 0;
+
+  function tapOverlay() {
+    if (mode === 'over') {
+      if (performance.now() - overAt < 600) return; // ochrona przed przypadkowym stuknięciem
+      g = newGame();
+    }
+    mode = 'run'; acc = 0; last = 0; flash = 0;
+    overlay.classList.add('hidden'); hud();
+  }
+
+  function pause() {
+    if (mode !== 'run') return;
+    mode = 'paused';
+    show('PAUZA', 'Poziom ' + g.level + ' · wynik ' + g.score, '', 'DOTKNIJ, ABY WRÓCIĆ');
+  }
+  document.addEventListener('visibilitychange', () => { if (document.hidden) pause(); });
+  window.addEventListener('blur', pause);
+
+  // --- dotyk: przesunięcie = kierunek (bez odrywania palca), stuknięcie = stop
+  const SWIPE = 14;
+  let ox = 0, oy = 0, swiped = false, downAt = 0, activeId = null;
+  const app = document.getElementById('app');
+  app.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    if (mode !== 'run') { tapOverlay(); activeId = null; return; }
+    activeId = e.pointerId; ox = e.clientX; oy = e.clientY; swiped = false; downAt = e.timeStamp;
+  });
+  app.addEventListener('pointermove', e => {
+    if (e.pointerId !== activeId || mode !== 'run') return;
+    e.preventDefault();
+    const dx = e.clientX - ox, dy = e.clientY - oy;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < SWIPE) return;
+    setWant(g, ME, Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up'));
+    ox = e.clientX; oy = e.clientY; swiped = true;
+  });
+  const up = e => {
+    if (e.pointerId !== activeId) return;
+    activeId = null;
+    if (!swiped && e.timeStamp - downAt < 300 && mode === 'run') setWant(g, ME, 'stop');
+  };
+  app.addEventListener('pointerup', up);
+  app.addEventListener('pointercancel', () => { activeId = null; });
+  // iOS: blokada przewijania, lupy i powiększania
+  ['touchstart', 'touchmove', 'gesturestart', 'contextmenu'].forEach(n =>
+    document.addEventListener(n, e => e.preventDefault(), { passive: false }));
+
+  // klawiatura (do testów na komputerze)
+  const KEYS = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
+                 w: 'up', s: 'down', a: 'left', d: 'right', ' ': 'stop' };
+  window.addEventListener('keydown', e => {
+    if (e.key === 'Escape' || e.key === 'p') { pause(); return; }
+    if (mode !== 'run') { if (e.key === 'Enter' || e.key === ' ') tapOverlay(); return; }
+    const k = KEYS[e.key]; if (k) { setWant(g, ME, k); e.preventDefault(); }
+  });
+
+  resize(); hud();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
