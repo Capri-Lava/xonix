@@ -5,215 +5,162 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta name="apple-mobile-web-app-title" content="Xonix">
-<meta name="theme-color" content="#05080f">
+<meta name="theme-color" content="#000000">
 <title>Xonix</title>
 <style>
-  :root {
-    --bg: #05080f;
-    --sea: #0a1020;
-    --land: #19b8b0;
-    --trail: #ff4fa3;
-    --player: #ffe94a;
-    --text: #d8e6f0;
-    --dim: #6f8496;
-  }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body {
-    margin: 0; height: 100%; background: var(--bg); color: var(--text);
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-    overflow: hidden; overscroll-behavior: none;
-    touch-action: none; user-select: none; -webkit-user-select: none;
-    -webkit-touch-callout: none;
+    margin: 0; height: 100%; background: #000; overflow: hidden; overscroll-behavior: none;
+    touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
   }
   #app {
-    position: fixed; inset: 0; display: flex; flex-direction: column;
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
     padding: env(safe-area-inset-top) env(safe-area-inset-right)
              env(safe-area-inset-bottom) env(safe-area-inset-left);
   }
-  #hud {
-    display: grid; grid-template-columns: 1fr 1fr 1fr; align-items: center;
-    padding: 8px 14px 4px; font-size: 14px; letter-spacing: .04em;
-  }
-  #hud .mid { text-align: center; }
-  #hud .right { text-align: right; }
-  #hud b { color: #fff; font-weight: 700; }
-  #lives { color: var(--trail); letter-spacing: .15em; }
-  #bar {
-    position: relative; height: 8px; margin: 2px 14px 8px;
-    background: var(--sea); border-radius: 4px; overflow: hidden;
-  }
-  #barFill { height: 100%; width: 0; background: var(--land); transition: width .15s; }
-  #barMark { position: absolute; top: 0; bottom: 0; left: 75%; width: 2px; background: #fff; opacity: .8; }
-  #stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; position: relative; }
-  canvas { display: block; image-rendering: pixelated; }
-  #overlay {
-    position: absolute; inset: 0; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; text-align: center;
-    background: rgba(5, 8, 15, .82); padding: 24px; gap: 14px;
-  }
-  #overlay.hidden { display: none; }
-  #overlay h1 { margin: 0; font-size: 44px; letter-spacing: .18em; color: var(--land); }
-  #overlay p { margin: 0; max-width: 300px; line-height: 1.5; font-size: 14px; color: var(--text); }
-  #overlay .dim { color: var(--dim); font-size: 12px; }
-  #overlay .cta { margin-top: 10px; color: var(--player); font-size: 16px; animation: blink 1.2s infinite; }
-  @keyframes blink { 50% { opacity: .35; } }
-  #hint { text-align: center; font-size: 11px; color: var(--dim); padding: 6px 0 8px; }
+  #stage { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
 </style>
 </head>
 <body>
-<div id="app">
-  <div id="hud">
-    <div>POZIOM <b id="level">1</b></div>
-    <div class="mid"><span id="lives">♥♥♥</span></div>
-    <div class="right"><b id="score">0</b></div>
-  </div>
-  <div id="bar"><div id="barFill"></div><div id="barMark"></div></div>
-  <div id="stage">
-    <canvas id="cv"></canvas>
-    <div id="overlay">
-      <h1>XONIX</h1>
-      <p id="msg">Przesuń palcem, żeby ruszyć. Wypłyń na ciemne pole, narysuj linię i wróć na brzeg, żeby odciąć teren. Zajmij 75% planszy.</p>
-      <p class="dim" id="sub">Kulka nie może dotknąć linii, zanim ją zamkniesz. Stuknięcie zatrzymuje Cię na brzegu.</p>
-      <div class="cta" id="cta">DOTKNIJ, ABY ZACZĄĆ</div>
-    </div>
-  </div>
-  <div id="hint">przesunięcie = kierunek · stuknięcie = stop</div>
-</div>
+<div id="app"><div id="stage"><canvas id="cv"></canvas></div></div>
 
 <script id="sim">
 // ---------------------------------------------------------------------------
-// Symulacja (bez DOM). Stan gry trzyma listę graczy, żeby później dołożyć
-// kooperację: host liczy symulację, drugi telefon przysyła tylko kierunki.
+// Symulacja (bez DOM). Tryby: 'solo', 'coop', 'versus', 'demo'.
+// W grze sieciowej liczy ją tylko host; gość przysyła kierunki.
 // ---------------------------------------------------------------------------
 const COLS = 36, ROWS = 60, BORDER = 2;
-const SEA = 0, LAND = 1, TRAIL = 2;
-const TARGET = 0.75;
-const TICK_MS = 70;
+const SEA = 0, LAND = 1, OWN = 2 /* +gracz */, TRAIL = 4 /* +gracz */;
+const TARGET = 0.75, TICK_MS = 70;
+const isLand = v => v >= 1 && v <= 3, isTrail = v => v >= 4;
+const DIRS = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
 
 function idx(x, y) { return y * COLS + x; }
+function homeOf(i, n) { return { x: Math.round(COLS * (i + 1) / (n + 1)), y: 0 }; }
 
-function newGame() {
-  const g = { level: 1, lives: 3, score: 0, state: 'play', wait: 0, players: [] };
+function newGame(mode, n) {
+  const g = { mode, n, level: 1, score: 0, lives: mode === 'coop' ? 5 : 3,
+              wins: [0, 0], winner: -1, state: 'play', wait: 0, ev: [] };
   startLevel(g);
   return g;
 }
 
-function homeOf(i, n) {
-  // pozycje startowe na górnym brzegu, rozłożone równo
-  return { x: Math.round(COLS * (i + 1) / (n + 1)), y: 0 };
-}
-
-function startLevel(g, nPlayers) {
-  const n = nPlayers || g.players.length || 1;
+function startLevel(g) {
   g.grid = new Uint8Array(COLS * ROWS);
   for (let y = 0; y < ROWS; y++)
     for (let x = 0; x < COLS; x++)
       if (x < BORDER || y < BORDER || x >= COLS - BORDER || y >= ROWS - BORDER)
         g.grid[idx(x, y)] = LAND;
   g.seaTotal = (COLS - 2 * BORDER) * (ROWS - 2 * BORDER);
-  g.filled = 0;
+  g.filled = 0; g.area = [0, 0]; g.winner = -1;
   g.players = [];
-  for (let i = 0; i < n; i++) {
-    const h = homeOf(i, n);
-    g.players.push({ x: h.x, y: h.y, px: h.x, py: h.y, dx: 0, dy: 0, want: null, inSea: false });
+  for (let i = 0; i < g.n; i++) {
+    const h = homeOf(i, g.n);
+    g.players.push({ x: h.x, y: h.y, px: h.x, py: h.y, dx: 0, dy: 0, want: null,
+                     inSea: false, safe: 15, lives: 3 });
   }
   g.balls = [];
-  const nBalls = g.level + 1;
+  const nBalls = Math.min(g.level + 1, 8);
   for (let i = 0; i < nBalls; i++) {
     const x = BORDER + 3 + Math.floor(Math.random() * (COLS - 2 * BORDER - 6));
     const y = BORDER + 10 + Math.floor(Math.random() * (ROWS - 2 * BORDER - 14));
     g.balls.push({ x, y, px: x, py: y, dx: Math.random() < .5 ? 1 : -1, dy: Math.random() < .5 ? 1 : -1 });
   }
   g.crawlers = [];
-  const nCrawl = 1 + Math.floor((g.level - 1) / 3);
+  const nCrawl = Math.min(3, 1 + Math.floor((g.level - 1) / 3));
   for (let i = 0; i < nCrawl; i++) {
-    const x = 4 + Math.floor(Math.random() * (COLS - 8));
-    const y = ROWS - 1;
+    const x = 4 + Math.floor(Math.random() * (COLS - 8)), y = ROWS - 1;
     g.crawlers.push({ x, y, px: x, py: y, dx: Math.random() < .5 ? 1 : -1, dy: -1 });
   }
-  g.safe = 15;
   g.state = 'play';
 }
 
-function setWant(g, pi, dir) {
-  // dir: 'up' | 'down' | 'left' | 'right' | 'stop'
-  const p = g.players[pi];
-  if (p) p.want = dir;
-}
+function nextRound(g) { g.level++; startLevel(g); }
 
-const DIRS = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
+function setWant(g, pi, dir) { const p = g.players[pi]; if (p) p.want = dir; }
 
 function step(g) {
+  g.ev = [];
   for (const p of g.players) { p.px = p.x; p.py = p.y; }
   for (const b of g.balls) { b.px = b.x; b.py = b.y; }
   for (const c of g.crawlers) { c.px = c.x; c.py = c.y; }
 
-  if (g.state === 'dead' || g.state === 'levelup') {
-    if (--g.wait <= 0) {
-      if (g.state === 'levelup') { g.level++; startLevel(g); }
-      else g.state = 'play';
-    }
+  if (g.state === 'levelup') {
+    if (--g.wait <= 0) { g.level++; startLevel(g); }
     return;
   }
   if (g.state !== 'play') return;
-  if (g.safe > 0) g.safe--;
 
-  let died = false;
-  for (const p of g.players) if (stepPlayer(g, p)) died = true;
-  if (g.state !== 'play') return; // poziom ukończony
-  for (const b of g.balls) if (stepBall(g, b)) died = true;
+  for (let i = 0; i < g.players.length; i++) {
+    if (g.players[i].safe > 0) g.players[i].safe--;
+    stepPlayer(g, i);
+    if (g.state !== 'play') return;
+  }
+  for (const b of g.balls) {
+    const hit = stepBall(g, b);
+    if (hit >= 0) { die(g, hit); if (g.state !== 'play') return; }
+  }
   for (const c of g.crawlers) stepCrawler(g, c);
 
-  for (const p of g.players) {
-    for (const b of g.balls) if (b.x === p.x && b.y === p.y) died = true;
-    if (g.safe <= 0)
-      for (const c of g.crawlers) if (c.x === p.x && c.y === p.y) died = true;
+  for (let i = 0; i < g.players.length; i++) {
+    const p = g.players[i];
+    let dead = false;
+    for (const b of g.balls) if (b.x === p.x && b.y === p.y) dead = true;
+    if (p.safe <= 0) for (const c of g.crawlers) if (c.x === p.x && c.y === p.y) dead = true;
+    if (dead) { die(g, i); if (g.state !== 'play') return; }
   }
-  if (died) die(g);
 }
 
-function stepPlayer(g, p) {
+function stepPlayer(g, i) {
+  const p = g.players[i], G = g.grid;
   if (p.want) {
     if (p.want === 'stop') { if (!p.inSea) { p.dx = 0; p.dy = 0; } }
     else {
       const d = DIRS[p.want];
-      const reverse = d[0] === -p.dx && d[1] === -p.dy && (p.dx || p.dy);
+      const reverse = (p.dx || p.dy) && d[0] === -p.dx && d[1] === -p.dy;
       if (!(p.inSea && reverse)) { p.dx = d[0]; p.dy = d[1]; }
     }
     p.want = null;
   }
-  if (!p.dx && !p.dy) return false;
+  if (!p.dx && !p.dy) return;
   const nx = p.x + p.dx, ny = p.y + p.dy;
-  if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) { p.dx = 0; p.dy = 0; return false; }
-  const c = g.grid[idx(nx, ny)];
-  if (c === TRAIL) return true; // wjazd we własną (lub cudzą) linię
-  p.x = nx; p.y = ny;
-  if (c === SEA) { g.grid[idx(nx, ny)] = TRAIL; p.inSea = true; }
-  else if (p.inSea) {
-    p.inSea = false; p.dx = 0; p.dy = 0;
-    closeTrails(g);
+  if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) { p.dx = 0; p.dy = 0; return; }
+  let c = G[idx(nx, ny)];
+  if (isTrail(c)) {
+    const owner = c - TRAIL;
+    if (owner !== i && g.mode === 'versus') {   // przecięcie linii rywala
+      die(g, owner);
+      if (g.state !== 'play') return;
+      c = G[idx(nx, ny)];
+      if (isTrail(c)) return;
+    } else { die(g, i); return; }               // własna linia albo linia partnera
   }
-  return false;
+  p.x = nx; p.y = ny;
+  if (c === SEA) { G[idx(nx, ny)] = TRAIL + i; p.inSea = true; }
+  else if (p.inSea) { p.inSea = false; p.dx = 0; p.dy = 0; closeTrail(g, i); }
 }
 
+// zwraca numer gracza, którego linię trafiła kulka, albo -1
 function stepBall(g, b) {
   const G = g.grid;
   const hx = G[idx(b.x + b.dx, b.y)], hy = G[idx(b.x, b.y + b.dy)];
-  if (hx === TRAIL || hy === TRAIL) return true;
-  if (hx === LAND) b.dx = -b.dx;
-  if (hy === LAND) b.dy = -b.dy;
+  if (isTrail(hx)) return hx - TRAIL;
+  if (isTrail(hy)) return hy - TRAIL;
+  if (isLand(hx)) b.dx = -b.dx;
+  if (isLand(hy)) b.dy = -b.dy;
   let t = G[idx(b.x + b.dx, b.y + b.dy)];
-  if (t === LAND) { b.dx = -b.dx; b.dy = -b.dy; t = G[idx(b.x + b.dx, b.y + b.dy)]; }
-  if (t === TRAIL) return true;
-  if (t === LAND) return false; // zakleszczona w kieszonce 1×1
+  if (isLand(t)) { b.dx = -b.dx; b.dy = -b.dy; t = G[idx(b.x + b.dx, b.y + b.dy)]; }
+  if (isTrail(t)) return t - TRAIL;
+  if (isLand(t)) return -1;
   b.x += b.dx; b.y += b.dy;
-  return false;
+  return -1;
 }
 
 function stepCrawler(g, c) {
-  const ok = (x, y) => x >= 0 && y >= 0 && x < COLS && y < ROWS && g.grid[idx(x, y)] === LAND;
+  const ok = (x, y) => x >= 0 && y >= 0 && x < COLS && y < ROWS && isLand(g.grid[idx(x, y)]);
   if (!ok(c.x + c.dx, c.y)) c.dx = -c.dx;
   if (!ok(c.x, c.y + c.dy)) c.dy = -c.dy;
   if (!ok(c.x + c.dx, c.y + c.dy)) { c.dx = -c.dx; c.dy = -c.dy; }
@@ -221,225 +168,601 @@ function stepCrawler(g, c) {
   c.x += c.dx; c.y += c.dy;
 }
 
-function closeTrails(g) {
-  const G = g.grid;
-  // Linie graczy, którzy wciąż są na morzu, zostają (ważne w kooperacji).
-  const keep = new Uint8Array(G.length);
-  for (const p of g.players) if (p.inSea) markTrail(G, keep, p.x, p.y);
+function closeTrail(g, i) {
+  const G = g.grid, T = TRAIL + i, val = g.mode === 'versus' ? OWN + i : LAND;
   let gained = 0;
-  for (let i = 0; i < G.length; i++)
-    if (G[i] === TRAIL && !keep[i]) { G[i] = LAND; gained++; }
-  // Zalewamy od kulek: co nieosiągalne, staje się lądem.
-  const seen = new Uint8Array(G.length);
-  const stack = [];
+  for (let k = 0; k < G.length; k++) if (G[k] === T) { G[k] = val; gained++; }
+  // zalewamy od kulek: morze, do którego nie dotrą, staje się lądem
+  const seen = new Uint8Array(G.length), stack = [];
   for (const b of g.balls) stack.push(idx(b.x, b.y));
   while (stack.length) {
-    const i = stack.pop();
-    if (seen[i] || G[i] === LAND) continue;
-    seen[i] = 1;
-    stack.push(i - 1, i + 1, i - COLS, i + COLS);
+    const k = stack.pop();
+    if (seen[k] || isLand(G[k])) continue;
+    seen[k] = 1;
+    stack.push(k - 1, k + 1, k - COLS, k + COLS);
   }
-  for (let i = 0; i < G.length; i++)
-    if (G[i] === SEA && !seen[i]) { G[i] = LAND; gained++; }
-  g.filled += gained;
-  g.score += gained * (gained > 150 ? 3 : gained > 50 ? 2 : 1);
+  for (let k = 0; k < G.length; k++) if (G[k] === SEA && !seen[k]) { G[k] = val; gained++; }
+  g.filled += gained; g.area[i] += gained;
+  if (g.mode !== 'versus') g.score += gained * (gained > 150 ? 3 : gained > 50 ? 2 : 1);
   if (g.filled / g.seaTotal >= TARGET) {
-    g.score += 500 * g.level;
-    g.state = 'levelup'; g.wait = 20;
+    if (g.mode === 'versus') {
+      g.winner = g.area[0] > g.area[1] ? 0 : g.area[1] > g.area[0] ? 1 : -1;
+      if (g.winner >= 0) g.wins[g.winner]++;
+      g.state = 'round';
+    } else { g.score += 500 * g.level; g.state = 'levelup'; g.wait = 20; }
   }
 }
 
-function markTrail(G, keep, x, y) {
-  const stack = [idx(x, y)];
-  while (stack.length) {
-    const i = stack.pop();
-    if (keep[i] || G[i] !== TRAIL) continue;
-    keep[i] = 1;
-    stack.push(i - 1, i + 1, i - COLS, i + COLS);
-  }
+function die(g, i) {
+  if (g.ev.indexOf(i) >= 0) return;
+  g.ev.push(i);
+  const p = g.players[i], G = g.grid, T = TRAIL + i;
+  for (let k = 0; k < G.length; k++) if (G[k] === T) G[k] = SEA;
+  const h = homeOf(i, g.n);
+  p.x = p.px = h.x; p.y = p.py = h.y; p.dx = p.dy = 0; p.want = null; p.inSea = false; p.safe = 25;
+  if (g.mode === 'versus') {
+    if (--p.lives <= 0) { g.winner = 1 - i; g.wins[1 - i]++; g.state = 'round'; }
+  } else if (--g.lives <= 0) g.state = 'over';
 }
 
-function die(g) {
-  g.lives--;
-  for (let i = 0; i < g.grid.length; i++) if (g.grid[i] === TRAIL) g.grid[i] = SEA;
-  const n = g.players.length;
-  g.players.forEach((p, i) => {
-    const h = homeOf(i, n);
-    p.x = p.px = h.x; p.y = p.py = h.y; p.dx = p.dy = 0; p.want = null; p.inSea = false;
-  });
-  g.safe = 25;
-  if (g.lives <= 0) g.state = 'over';
-  else { g.state = 'dead'; g.wait = 10; }
+// --- stan gry wysyłany gościowi ---
+function rle(G) {
+  const o = []; let v = G[0], n = 1;
+  for (let i = 1; i < G.length; i++) { if (G[i] === v) n++; else { o.push(v, n); v = G[i]; n = 1; } }
+  o.push(v, n); return o;
 }
-
-function percent(g) { return g.filled / g.seaTotal; }
+function unrle(o) {
+  const G = new Uint8Array(COLS * ROWS); let k = 0;
+  for (let i = 0; i < o.length; i += 2) { G.fill(o[i], k, k + o[i + 1]); k += o[i + 1]; }
+  return G;
+}
+function snap(g) {
+  const flat = a => { const r = []; for (const e of a) r.push(e.x, e.y); return r; };
+  return { t: 's', m: g.mode, st: g.state, lv: g.level, sc: g.score, li: g.lives, f: g.filled,
+           ar: g.area, w: g.wins, wn: g.winner, ev: g.ev, gr: rle(g.grid),
+           p: g.players.map(p => [p.x, p.y, p.lives]), b: flat(g.balls), c: flat(g.crawlers) };
+}
+function unsnap(s, old) {
+  const near = (e, x, y) => e && Math.abs(e.x - x) <= 1 && Math.abs(e.y - y) <= 1;
+  const ent = (a, o) => {
+    const r = [];
+    for (let k = 0; k < a.length; k += 2) {
+      const x = a[k], y = a[k + 1], e = o && o[k / 2], n = near(e, x, y);
+      r.push({ x, y, px: n ? e.x : x, py: n ? e.y : y });
+    }
+    return r;
+  };
+  return { mode: s.m, n: s.p.length, state: s.st, level: s.lv, score: s.sc, lives: s.li, filled: s.f,
+           area: s.ar, wins: s.w, winner: s.wn, ev: s.ev, grid: unrle(s.gr),
+           seaTotal: (COLS - 2 * BORDER) * (ROWS - 2 * BORDER),
+           balls: ent(s.b, old && old.balls), crawlers: ent(s.c, old && old.crawlers),
+           players: s.p.map((q, i) => {
+             const e = old && old.players[i], n = near(e, q[0], q[1]);
+             return { x: q[0], y: q[1], px: n ? e.x : q[0], py: n ? e.y : q[1], lives: q[2] };
+           }) };
+}
 </script>
 
 <script>
 // ---------------------------------------------------------------------------
-// Interfejs: rysowanie, dotyk, pętla gry
+// Interfejs: ekran 180×330 "pikseli" skalowany bez wygładzania, czcionka 5×7,
+// paleta EGA, dźwięk jak z głośniczka PC.
 // ---------------------------------------------------------------------------
 (function () {
-  const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
-  const stage = document.getElementById('stage');
-  const overlay = document.getElementById('overlay');
-  const el = id => document.getElementById(id);
-  const COLORS = { sea: '#0a1020', land: '#19b8b0', landEdge: '#127f7a', trail: '#ff4fa3',
-                   ball: '#ffffff', crawler: '#ffb020', players: ['#ffe94a', '#7dff6a'] };
+  const W = 180, H = 330, CELL = 5, Y0 = 18;
+  const C = { black: '#000000', cyan: '#00AAAA', lcyan: '#55FFFF', white: '#FFFFFF', gray: '#AAAAAA',
+              dgray: '#555555', red: '#FF5555', dred: '#AA0000', yellow: '#FFFF55',
+              own: ['#AA00AA', '#00AA00'], trail: ['#FF55FF', '#55FF55'], player: ['#FFFFFF', '#FFFF55'] };
+  const NAME = ['BIAŁY', 'ŻÓŁTY'];
 
-  let g = newGame();
-  let mode = 'menu';          // menu | run | paused | over
-  let cell = 10, acc = 0, last = 0, flash = 0;
-  const ME = 0;               // indeks lokalnego gracza
+  // --- czcionka 5×7 (wiersze jako liczby 5-bitowe) ---
+  const F = {
+    A:[14,17,17,31,17,17,17], B:[30,17,17,30,17,17,30], C:[14,17,16,16,16,17,14], D:[30,17,17,17,17,17,30],
+    E:[31,16,16,30,16,16,31], F:[31,16,16,30,16,16,16], G:[14,17,16,23,17,17,15], H:[17,17,17,31,17,17,17],
+    I:[14,4,4,4,4,4,14], J:[7,2,2,2,2,18,12], K:[17,18,20,24,20,18,17], L:[16,16,16,16,16,16,31],
+    M:[17,27,21,21,17,17,17], N:[17,25,21,19,17,17,17], O:[14,17,17,17,17,17,14], P:[30,17,17,30,16,16,16],
+    Q:[14,17,17,17,21,18,13], R:[30,17,17,30,20,18,17], S:[15,16,16,14,1,1,30], T:[31,4,4,4,4,4,4],
+    U:[17,17,17,17,17,17,14], V:[17,17,17,17,17,10,4], W:[17,17,17,21,21,21,10], X:[17,17,10,4,10,17,17],
+    Y:[17,17,10,4,4,4,4], Z:[31,1,2,4,8,16,31], 'Ł':[16,16,20,24,16,16,31],
+    0:[14,17,19,21,25,17,14], 1:[4,12,4,4,4,4,14], 2:[14,17,1,2,4,8,31], 3:[31,2,4,2,1,17,14],
+    4:[2,6,10,18,31,2,2], 5:[31,16,30,1,1,17,14], 6:[6,8,16,30,17,17,14], 7:[31,1,2,4,8,8,8],
+    8:[14,17,17,14,17,17,14], 9:[14,17,17,15,1,2,12],
+    ' ':[0,0,0,0,0,0,0], '.':[0,0,0,0,0,12,12], ',':[0,0,0,0,12,4,8], ':':[0,12,12,0,12,12,0],
+    '!':[4,4,4,4,4,0,4], '?':[14,17,1,2,4,0,4], '%':[24,25,2,4,8,19,3], '-':[0,0,0,31,0,0,0],
+    '+':[0,4,4,31,4,4,0], '/':[1,1,2,4,8,16,16], '>':[8,4,2,1,2,4,8], '<':[2,4,8,16,8,4,2],
+    '=':[0,0,31,0,31,0,0], '(':[2,4,8,8,8,4,2], ')':[8,4,2,2,2,4,8], '♥':[0,10,31,31,14,4,0]
+  };
+  // znaki polskie: [litera, wiersz nad, wiersz pod]
+  const ACC = { 'Ą':['A',0,3], 'Ę':['E',0,3], 'Ć':['C',6,0], 'Ń':['N',6,0], 'Ó':['O',6,0],
+                'Ś':['S',6,0], 'Ź':['Z',6,0], 'Ż':['Z',4,0] };
 
-  let best = 0;
-  try { best = +localStorage.getItem('xonix.best') || 0; } catch (e) {}
+  const cv = document.getElementById('cv'), ctx = cv.getContext('2d'), stage = document.getElementById('stage');
+  let scale = 2;
 
   function resize() {
     const dpr = window.devicePixelRatio || 1;
-    const w = stage.clientWidth, h = stage.clientHeight;
-    cell = Math.max(2, Math.floor(Math.min(w * dpr / COLS, h * dpr / ROWS)));
-    cv.width = cell * COLS; cv.height = cell * ROWS;
-    cv.style.width = cv.width / dpr + 'px';
-    cv.style.height = cv.height / dpr + 'px';
-    draw(1);
+    scale = Math.max(1, Math.floor(Math.min(stage.clientWidth * dpr / W, stage.clientHeight * dpr / H)));
+    cv.width = W * scale; cv.height = H * scale;
+    cv.style.width = cv.width / dpr + 'px'; cv.style.height = cv.height / dpr + 'px';
   }
   window.addEventListener('resize', resize);
-  window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+  window.addEventListener('orientationchange', () => setTimeout(resize, 250));
 
-  function show(title, msg, sub, cta) {
-    overlay.querySelector('h1').textContent = title;
-    el('msg').textContent = msg; el('sub').textContent = sub; el('cta').textContent = cta;
-    overlay.classList.remove('hidden');
+  function rect(x, y, w, h, col) { ctx.fillStyle = col; ctx.fillRect(x, y, w, h); }
+  function bits(b, x, y, sc) { for (let k = 0; k < 5; k++) if (b & (16 >> k)) ctx.fillRect(x + k * sc, y, sc, sc); }
+  function text(s, x, y, col, sc) {
+    sc = sc || 1; ctx.fillStyle = col;
+    for (const ch of String(s).toUpperCase()) {
+      const a = ACC[ch], rows = F[a ? a[0] : ch] || F['?'];
+      if (a && a[1]) bits(a[1], x, y - sc, sc);
+      for (let r = 0; r < 7; r++) bits(rows[r], x, y + r * sc, sc);
+      if (a && a[2]) bits(a[2], x, y + 7 * sc, sc);
+      x += 6 * sc;
+    }
+  }
+  const tw = (s, sc) => String(s).length * 6 * (sc || 1) - (sc || 1);
+  function ctext(s, y, col, sc) { text(s, Math.floor((W - tw(s, sc)) / 2), y, col, sc); }
+  function rtext(s, xr, y, col) { text(s, xr - tw(s), y, col); }
+  const pad = (n, l) => String(n).padStart(l, '0');
+  const blink = () => (performance.now() / 450 | 0) % 2 === 0;
+
+  function box(x, y, w, h, col) {         // ramka jak w okienku DOS-owym
+    rect(x, y, w, h, C.black); rect(x, y, w, 1, col); rect(x, y + h - 1, w, 1, col);
+    rect(x, y, 1, h, col); rect(x + w - 1, y, 1, h, col);
+  }
+  function dbox(x, y, w, h) { box(x, y, w, h, C.cyan); box(x + 2, y + 2, w - 4, h - 4, C.cyan); }
+
+  let btns = [];
+  function button(label, x, y, w, h, fn, col, left) {
+    box(x, y, w, h, C.cyan);
+    const ty = y + Math.floor((h - 7) / 2);
+    if (left) text(label, x + 4, ty, col || C.lcyan);
+    else text(label, x + Math.floor((w - tw(label)) / 2), ty, col || C.lcyan);
+    btns.push({ x, y, w, h, fn });
   }
 
-  function hud() {
-    el('level').textContent = g.level;
-    el('lives').textContent = '♥'.repeat(Math.max(0, g.lives)) || '–';
-    el('score').textContent = g.score;
-    el('barFill').style.width = Math.min(100, percent(g) * 100) + '%';
+  // --- dźwięk: fala prostokątna jak z głośniczka PC ---
+  let AC = null, soundOn = true;
+  try { soundOn = localStorage.getItem('xonix.sound') !== '0'; } catch (e) {}
+  function unlockAudio() {
+    try {
+      if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
+      if (AC.state === 'suspended') AC.resume();
+    } catch (e) {}
+  }
+  function beep(seq) {
+    if (!soundOn || !AC) return;
+    try {
+      let t = AC.currentTime;
+      for (const [f, d] of seq) {
+        const o = AC.createOscillator(), ga = AC.createGain();
+        o.type = 'square'; o.frequency.value = f; ga.gain.value = .04;
+        o.connect(ga); ga.connect(AC.destination); o.start(t); o.stop(t + d); t += d;
+      }
+    } catch (e) {}
+  }
+  const SFX = { fill: [[880, .04], [1320, .05]], die: [[440, .08], [330, .08], [220, .16]],
+                other: [[330, .06], [220, .1]], win: [[523, .08], [659, .08], [784, .08], [1047, .18]],
+                over: [[392, .14], [330, .14], [262, .14], [196, .3]], click: [[1000, .03]] };
+
+  // --- stan interfejsu ---
+  let scr = 'menu';            // menu | host | join | wait | msg | game
+  let g = null, demo = null;
+  let role = 'solo', ME = 0;   // solo | host | guest
+  let acc = 0, dacc = 0, last = 0, alpha = 1, flash = 0;
+  let paused = false, quitOpen = false;
+  let lastState = 'play', lastFilled = 0, stateAt = 0, newRecord = false;
+  let msg = [], entry = '';
+  let best = { solo: 0, coop: 0 };
+  try { best.solo = +localStorage.getItem('xonix.best') || 0; best.coop = +localStorage.getItem('xonix.best.coop') || 0; } catch (e) {}
+
+  function makeDemo() {
+    const d = newGame('demo', 0);
+    d.level = 3; startLevel(d);
+    const G = d.grid;
+    for (let y = 0; y <= 14; y++) for (let x = 0; x < COLS; x++) G[idx(x, y)] = LAND;
+    'XONIX'.split('').forEach((ch, k) => {       // logo: litery wycięte z lądu
+      for (let r = 0; r < 7; r++) for (let b = 0; b < 5; b++)
+        if (F[ch][r] & (16 >> b)) G[idx(4 + k * 6 + b, 5 + r)] = SEA;
+    });
+    for (const b of d.balls) { b.y = b.py = 18 + Math.floor(Math.random() * 36); }
+    return d;
   }
 
-  function draw(a) {
-    const G = g.grid, c = cell;
-    ctx.fillStyle = COLORS.sea; ctx.fillRect(0, 0, cv.width, cv.height);
+  // --- sieć (PeerJS: bezpośrednie połączenie dwóch telefonów) ---
+  const PEER_SRC = 'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js';
+  const ROOM = 'xonix-capri-lava-';
+  let peer = null, conn = null, code = '', netMsg = '', pendMode = 'coop';
+  let lastRx = 0, lastPing = 0, snapAt = 0, netTimer = 0;
+
+  function loadPeer() {
+    return new Promise((res, rej) => {
+      if (window.Peer) return res();
+      const s = document.createElement('script');
+      s.src = PEER_SRC; s.onload = () => window.Peer ? res() : rej(); s.onerror = rej;
+      document.head.appendChild(s);
+    });
+  }
+  function netClose() {
+    clearTimeout(netTimer);
+    try { if (conn) conn.close(); } catch (e) {}
+    try { if (peer) peer.destroy(); } catch (e) {}
+    conn = null; peer = null;
+  }
+  function toMenu() { netClose(); role = 'solo'; ME = 0; g = null; scr = 'menu'; quitOpen = paused = false; }
+  function fail(lines) { netClose(); role = 'solo'; ME = 0; g = null; msg = lines; scr = 'msg'; stateAt = performance.now(); }
+  function lost() { if (scr === 'game' || scr === 'wait') fail(['POŁĄCZENIE', 'ZERWANE']); }
+
+  function hostGame(mode) {
+    netClose(); role = 'host'; ME = 0; pendMode = mode; code = ''; netMsg = 'ŁĄCZĘ Z SERWEREM'; scr = 'host';
+    loadPeer().then(() => openHost(0)).catch(() => { if (scr === 'host') fail(['BRAK POŁĄCZENIA', 'Z INTERNETEM']); });
+  }
+  function openHost(tries) {
+    if (scr !== 'host') return;
+    const c = String(1000 + Math.floor(Math.random() * 9000));
+    const my = peer = new Peer(ROOM + c);
+    my.on('open', () => { if (peer === my) { code = c; netMsg = 'CZEKAM NA GRACZA'; } });
+    my.on('connection', cn => {
+      if (conn || scr !== 'host') { try { cn.close(); } catch (e) {} return; }
+      conn = cn;
+      const go = () => {
+        if (conn !== cn || scr !== 'host') return;
+        g = newGame(pendMode, 2); scr = 'game'; enterGame(); lastRx = performance.now();
+      };
+      cn.on('open', go);
+      cn.on('data', m => {
+        if (conn !== cn || !m) return;
+        lastRx = performance.now();
+        if (m.t === 'i' && g) setWant(g, 1, m.d);
+        else if (m.t === 'go') proceed();
+      });
+      cn.on('close', () => { if (conn === cn) lost(); });
+      if (cn.open) go();
+    });
+    my.on('error', e => {
+      if (peer !== my) return;
+      if (e && e.type === 'unavailable-id' && tries < 5) { try { my.destroy(); } catch (x) {} openHost(tries + 1); }
+      else if (scr === 'host') fail(['BŁĄD POŁĄCZENIA', 'SPRÓBUJ PONOWNIE']);
+    });
+    my.on('disconnected', () => { if (peer === my && !my.destroyed) try { my.reconnect(); } catch (e) {} });
+  }
+
+  function joinGame(c) {
+    netClose(); role = 'guest'; ME = 1; code = c; netMsg = 'ŁĄCZĘ Z GRĄ ' + c; scr = 'wait';
+    loadPeer().then(() => {
+      if (scr !== 'wait') return;
+      const my = peer = new Peer();
+      my.on('open', () => {
+        if (peer !== my) return;
+        const cn = conn = my.connect(ROOM + c, { reliable: true });
+        cn.on('open', () => { lastRx = performance.now(); });
+        cn.on('data', m => {
+          if (conn !== cn || !m || m.t !== 's') return;
+          lastRx = performance.now();
+          g = unsnap(m, g); snapAt = lastRx;
+          if (scr === 'wait') { clearTimeout(netTimer); scr = 'game'; enterGame(); }
+          after();
+        });
+        cn.on('close', () => { if (conn === cn) lost(); });
+      });
+      my.on('error', e => {
+        if (peer !== my || scr !== 'wait') return;
+        fail(e && e.type === 'peer-unavailable' ? ['NIE MA GRY', 'O KODZIE ' + c] : ['BŁĄD POŁĄCZENIA', 'SPRÓBUJ PONOWNIE']);
+      });
+      netTimer = setTimeout(() => { if (scr === 'wait') fail(['NIE UDAŁO SIĘ', 'POŁĄCZYĆ']); }, 20000);
+    }).catch(() => { if (scr === 'wait') fail(['BRAK POŁĄCZENIA', 'Z INTERNETEM']); });
+  }
+
+  function shareLink() {
+    const url = location.origin + location.pathname + '?kod=' + code;
+    const done = () => { netMsg = 'LINK SKOPIOWANY'; setTimeout(() => { if (scr === 'host') netMsg = 'CZEKAM NA GRACZA'; }, 2000); };
+    if (navigator.share) navigator.share({ title: 'Xonix', text: 'Zagraj ze mną w Xonix, kod ' + code, url }).catch(() => {});
+    else if (navigator.clipboard) navigator.clipboard.writeText(url).then(done).catch(() => {});
+  }
+
+  // --- przebieg gry ---
+  function startSolo() { netClose(); role = 'solo'; ME = 0; g = newGame('solo', 1); scr = 'game'; enterGame(); }
+  function enterGame() {
+    acc = 0; flash = 0; paused = quitOpen = false; newRecord = false;
+    lastState = g ? g.state : 'play'; lastFilled = g ? g.filled : 0; stateAt = performance.now();
+  }
+  function after() {                       // reakcja na zdarzenia po kroku / po paczce od hosta
+    if (!g) return;
+    for (const i of g.ev) { if (i === ME) { flash = 10; beep(SFX.die); } else beep(SFX.other); }
+    if (g.filled > lastFilled) beep(SFX.fill);
+    lastFilled = g.filled;
+    if (g.state !== lastState) {
+      stateAt = performance.now();
+      if (g.state === 'levelup') beep(SFX.win);
+      if (g.state === 'round') beep(g.winner === ME ? SFX.win : SFX.over);
+      if (g.state === 'over') {
+        beep(SFX.over);
+        const k = g.mode === 'coop' ? 'coop' : 'solo';
+        newRecord = g.score > best[k];
+        if (newRecord) { best[k] = g.score; try { localStorage.setItem(k === 'coop' ? 'xonix.best.coop' : 'xonix.best', g.score); } catch (e) {} }
+      }
+      lastState = g.state;
+    }
+  }
+  function proceed() {                     // po końcu gry / rundy (tylko solo i host)
+    if (!g || performance.now() - stateAt < 800) return;
+    if (g.state === 'over') { g = newGame(g.mode, g.n); enterGame(); }
+    else if (g.state === 'round') { nextRound(g); enterGame(); }
+  }
+  function goOn() {
+    if (role === 'guest') { if (conn && conn.open && performance.now() - stateAt > 800) conn.send({ t: 'go' }); }
+    else proceed();
+  }
+  function input(d) {
+    if (!g || g.state !== 'play' || quitOpen || paused) return;
+    if (role === 'guest') { if (conn && conn.open) conn.send({ t: 'i', d }); }
+    else setWant(g, ME, d);
+  }
+
+  // --- rysowanie ---
+  const BALL = [14, 31, 31, 31, 14], DIAMOND = [4, 14, 31, 14, 4];
+  function sprite(rows, x, y, col) { ctx.fillStyle = col; for (let r = 0; r < 5; r++) bits(rows[r], x, y + r, 1); }
+
+  function drawBoard(b, a, sea) {
+    const G = b.grid;
+    rect(0, Y0, W, ROWS * CELL, sea || C.black);
     for (let y = 0; y < ROWS; y++) {
       let x = 0;
       while (x < COLS) {
         const v = G[y * COLS + x];
         if (v === SEA) { x++; continue; }
         let x2 = x; while (x2 < COLS && G[y * COLS + x2] === v) x2++;
-        ctx.fillStyle = v === LAND ? COLORS.land : COLORS.trail;
-        ctx.fillRect(x * c, y * c, (x2 - x) * c, c);
+        rect(x * CELL, Y0 + y * CELL, (x2 - x) * CELL, CELL, v === LAND ? C.cyan : v < TRAIL ? C.own[v - OWN] : C.trail[v - TRAIL]);
         x = x2;
       }
     }
-    const lerp = (p, q) => p + (q - p) * a;
-    for (const b of g.balls) {
-      ctx.fillStyle = COLORS.ball; ctx.beginPath();
-      ctx.arc((lerp(b.px, b.x) + .5) * c, (lerp(b.py, b.y) + .5) * c, c * .5, 0, 6.2832); ctx.fill();
+    const L = (p, q) => Math.round((p + (q - p) * a) * CELL);
+    for (const e of b.balls) sprite(BALL, L(e.px, e.x), Y0 + L(e.py, e.y), C.red);
+    for (const e of b.crawlers) sprite(DIAMOND, L(e.px, e.x), Y0 + L(e.py, e.y), C.black);
+    b.players.forEach((p, i) => rect(L(p.px, p.x), Y0 + L(p.py, p.y), CELL, CELL, C.player[i]));
+  }
+
+  function drawHud() {
+    const pct = v => Math.floor(v / g.seaTotal * 100);
+    rect(0, 11, W, 5, C.dgray);
+    if (g.mode === 'versus') {
+      const p = g.players;
+      text('G1 ' + pad(pct(g.area[0]), 2) + '% ' + '♥'.repeat(Math.max(0, p[0].lives)), 2, 2, C.trail[0]);
+      rtext('♥'.repeat(Math.max(0, p[1].lives)) + ' ' + pad(pct(g.area[1]), 2) + '% G2', W - 2, 2, C.trail[1]);
+      ctext(g.wins[0] + ':' + g.wins[1], 2, C.white);
+      const w0 = Math.round(g.area[0] / g.seaTotal * W), w1 = Math.round(g.area[1] / g.seaTotal * W);
+      rect(0, 11, w0, 5, C.own[0]); rect(w0, 11, w1, 5, C.own[1]);
+    } else {
+      text('POZIOM ' + pad(g.level, 2), 2, 2, C.lcyan);
+      ctext('♥'.repeat(Math.max(0, g.lives)), 2, C.red);
+      rtext(pad(g.score, 6), W - 2, 2, C.white);
+      rect(0, 11, Math.min(W, Math.round(g.filled / g.seaTotal * W)), 5, C.cyan);
     }
-    for (const k of g.crawlers) {
-      const x = (lerp(k.px, k.x) + .5) * c, y = (lerp(k.py, k.y) + .5) * c, r = c * .62;
-      ctx.fillStyle = COLORS.crawler; ctx.beginPath();
-      ctx.moveTo(x, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r, y); ctx.fill();
-      ctx.fillStyle = '#000'; ctx.fillRect(x - c * .12, y - c * .12, c * .24, c * .24);
+    rect(Math.round(W * TARGET), 10, 1, 7, C.white);
+  }
+
+  function drawGame() {
+    drawHud();
+    drawBoard(g, alpha, flash > 0 ? C.dred : C.black);
+    if (role === 'solo') text('PALEC=KIERUNEK STUK=STOP', 2, 321, C.dgray);
+    else if (role === 'guest' && performance.now() - lastRx > 1500) text('CZEKAM NA SYGNAŁ...', 2, 321, C.red);
+    else text('TY: ' + NAME[ME] + ' PIKSEL', 2, 321, C.player[ME]);
+    rtext('MENU', W - 2, 321, C.lcyan);
+    btns.push({ x: W - 34, y: 314, w: 34, h: 16, fn: () => { quitOpen = true; } });
+
+    if (quitOpen) {
+      btns = [];
+      dbox(20, 120, 140, 70);
+      ctext('WYJŚĆ DO MENU?', 134, C.white);
+      button('TAK', 34, 156, 50, 22, toMenu);
+      button('NIE', 96, 156, 50, 22, () => { quitOpen = false; });
+    } else if (paused) {
+      dbox(30, 130, 120, 50);
+      ctext('PAUZA', 142, C.white, 2);
+      if (blink()) ctext('DOTKNIJ EKRANU', 164, C.yellow);
+    } else if (g.state === 'levelup') {
+      dbox(22, 138, 136, 30);
+      ctext('POZIOM UKOŃCZONY!', 150, C.yellow);
+    } else if (g.state === 'over') {
+      const k = g.mode === 'coop' ? 'coop' : 'solo';
+      dbox(14, 100, 152, 124);
+      ctext('KONIEC GRY', 114, C.red, 2);
+      ctext('WYNIK  ' + pad(g.score, 6), 142, C.white);
+      ctext(newRecord ? 'NOWY REKORD!' : 'REKORD ' + pad(best[k], 6), 156, newRecord ? C.yellow : C.gray);
+      if (blink()) ctext('DOTKNIJ = JESZCZE RAZ', 176, C.yellow);
+      button('MENU', 60, 194, 60, 20, toMenu);
+    } else if (g.state === 'round') {
+      const pct = v => Math.floor(v / g.seaTotal * 100);
+      dbox(10, 92, 160, 140);
+      if (g.winner < 0) ctext('REMIS', 106, C.white, 2);
+      else ctext(g.winner === ME ? 'WYGRYWASZ!' : 'PRZEGRYWASZ', 106, g.winner === ME ? C.yellow : C.red, 2);
+      if (g.winner >= 0) ctext('RUNDA DLA: ' + NAME[g.winner], 132, C.player[g.winner]);
+      ctext('TEREN  ' + pct(g.area[0]) + '% : ' + pct(g.area[1]) + '%', 146, C.white);
+      ctext('MECZ   ' + g.wins[0] + ' : ' + g.wins[1], 160, C.white);
+      if (blink()) ctext('DOTKNIJ = NASTĘPNA RUNDA', 180, C.yellow);
+      button('MENU', 60, 200, 60, 20, toMenu);
     }
-    g.players.forEach((p, i) => {
-      const x = lerp(p.px, p.x) * c, y = lerp(p.py, p.y) * c, m = c * .25;
-      ctx.fillStyle = '#000'; ctx.fillRect(x - m, y - m, c + 2 * m, c + 2 * m);
-      ctx.fillStyle = COLORS.players[i % 2]; ctx.fillRect(x - m + 2, y - m + 2, c + 2 * m - 4, c + 2 * m - 4);
-    });
-    if (flash > 0) {
-      ctx.fillStyle = 'rgba(255,60,90,' + (flash / 12 * .45) + ')';
-      ctx.fillRect(0, 0, cv.width, cv.height);
+  }
+
+  function drawMenu() {
+    ctext('WYBIERZ TRYB GRY', 5, C.lcyan);
+    drawBoard(demo, alpha);
+    button('1. JEDEN GRACZ', 10, 106, 160, 18, startSolo, C.white, true);
+    button('2. WE DWÓCH: RAZEM', 10, 128, 160, 18, () => hostGame('coop'), C.white, true);
+    button('3. WE DWÓCH: POJEDYNEK', 10, 150, 160, 18, () => hostGame('versus'), C.white, true);
+    button('4. DOŁĄCZ DO GRY (KOD)', 10, 172, 160, 18, () => { entry = ''; scr = 'join'; }, C.white, true);
+    button('DŹWIĘK: ' + (soundOn ? 'TAK' : 'NIE'), 46, 198, 88, 14, toggleSound, C.gray);
+    if (best.solo) { rect(40, 223, 100, 11, C.black); ctext('REKORD ' + pad(best.solo, 6), 225, C.yellow); }
+    ctext('WEDŁUG GRY XONIX Z 1984 R.', 321, C.dgray);
+  }
+  function toggleSound() {
+    soundOn = !soundOn; try { localStorage.setItem('xonix.sound', soundOn ? '1' : '0'); } catch (e) {}
+    beep(SFX.click);
+  }
+
+  function drawHost() {
+    ctext(pendMode === 'coop' ? 'GRA RAZEM' : 'POJEDYNEK', 5, C.lcyan);
+    drawBoard(demo, alpha);
+    dbox(10, 104, 160, 150);
+    ctext('KOD GRY', 116, C.gray);
+    ctext(code || '....', 132, C.yellow, 4);
+    ctext(netMsg + (blink() ? '...' : '   '), 172, C.white);
+    if (code) {
+      ctext('DRUGI GRACZ WYBIERA', 186, C.gray);
+      ctext('4. DOŁĄCZ DO GRY', 196, C.gray);
+      button('WYŚLIJ LINK', 20, 222, 84, 22, shareLink);
     }
+    button('WRÓĆ', 110, 222, 50, 22, toMenu);
+  }
+
+  function drawJoin() {
+    ctext('DOŁĄCZ DO GRY', 5, C.lcyan);
+    drawBoard(demo, alpha);
+    dbox(10, 100, 160, 206);
+    ctext('PODAJ KOD GRY', 110, C.gray);
+    for (let k = 0; k < 4; k++) {
+      const x = 39 + k * 27;
+      box(x, 124, 21, 28, C.cyan);
+      if (entry[k]) text(entry[k], x + 3, 128, C.yellow, 3);
+      else if (k === entry.length && blink()) rect(x + 4, 146, 13, 2, C.yellow);
+    }
+    const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '<', '0', 'OK'];
+    keys.forEach((k, n) => button(k, 22 + (n % 3) * 47, 160 + Math.floor(n / 3) * 28, 42, 24, () => keyIn(k), C.white));
+    button('WRÓĆ', 65, 276, 50, 22, toMenu);
+  }
+  function keyIn(k) {
+    beep(SFX.click);
+    if (k === '<') entry = entry.slice(0, -1);
+    else if (k === 'OK') { if (entry.length === 4) joinGame(entry); }
+    else if (entry.length < 4) { entry += k; if (entry.length === 4) joinGame(entry); }
+  }
+
+  function drawWait() {
+    drawBoard(demo, alpha);
+    dbox(10, 120, 160, 90);
+    ctext(netMsg + (blink() ? '...' : '   '), 140, C.white);
+    button('ANULUJ', 60, 172, 60, 22, toMenu);
+  }
+  function drawMsg() {
+    drawBoard(demo, alpha);
+    dbox(10, 120, 160, 90);
+    msg.forEach((m, k) => ctext(m, 136 + k * 14, C.red));
+    if (blink()) ctext('DOTKNIJ EKRANU', 186, C.yellow);
+  }
+
+  function draw() {
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    rect(0, 0, W, H, C.black);
+    btns = [];
+    if (scr === 'game' && g) drawGame();
+    else if (scr === 'host') drawHost();
+    else if (scr === 'join') drawJoin();
+    else if (scr === 'wait') drawWait();
+    else if (scr === 'msg') drawMsg();
+    else drawMenu();
   }
 
   function frame(t) {
     requestAnimationFrame(frame);
     const dt = Math.min(250, t - (last || t)); last = t;
-    if (mode !== 'run') { draw(1); return; }
-    acc += dt;
-    while (acc >= TICK_MS) {
-      acc -= TICK_MS;
-      const livesBefore = g.lives, levelBefore = g.level;
-      step(g);
-      if (flash > 0) flash--;
-      if (g.lives < livesBefore) flash = 12;
-      if (g.level !== levelBefore || g.lives !== livesBefore) hud();
-      if (g.state === 'over') { gameOver(); break; }
+    const now = performance.now();
+    if (scr === 'game' && g) {
+      if (role === 'guest') {
+        alpha = Math.min(1, (now - snapAt) / TICK_MS);
+        if (now - lastPing > 1000 && conn && conn.open) { conn.send({ t: 'p' }); lastPing = now; }
+      } else {
+        const frozen = role === 'solo' && (quitOpen || paused);
+        if (!frozen) {
+          acc += dt;
+          while (acc >= TICK_MS) {
+            acc -= TICK_MS; step(g); after();
+            if (role === 'host' && conn && conn.open) conn.send(snap(g));
+          }
+        }
+        alpha = !frozen && g.state === 'play' ? acc / TICK_MS : 1;
+      }
+      if (role !== 'solo' && now - lastRx > 10000) lost();
+    } else {
+      dacc += dt;
+      while (dacc >= TICK_MS) { dacc -= TICK_MS; step(demo); }
+      alpha = dacc / TICK_MS;
     }
-    hud();
-    draw(g.state === 'play' ? acc / TICK_MS : 1);
+    if (flash > 0) flash--;
+    draw();
   }
 
-  function gameOver() {
-    mode = 'over';
-    const record = g.score > best;
-    if (record) { best = g.score; try { localStorage.setItem('xonix.best', best); } catch (e) {} }
-    show('KONIEC', 'Wynik: ' + g.score + ' · poziom ' + g.level,
-         record ? 'Nowy rekord!' : 'Rekord: ' + best, 'DOTKNIJ, ABY ZAGRAĆ PONOWNIE');
-    overAt = performance.now();
-  }
-  let overAt = 0;
-
-  function tapOverlay() {
-    if (mode === 'over') {
-      if (performance.now() - overAt < 600) return; // ochrona przed przypadkowym stuknięciem
-      g = newGame();
-    }
-    mode = 'run'; acc = 0; last = 0; flash = 0;
-    overlay.classList.add('hidden'); hud();
-  }
-
-  function pause() {
-    if (mode !== 'run') return;
-    mode = 'paused';
-    show('PAUZA', 'Poziom ' + g.level + ' · wynik ' + g.score, '', 'DOTKNIJ, ABY WRÓCIĆ');
-  }
-  document.addEventListener('visibilitychange', () => { if (document.hidden) pause(); });
-  window.addEventListener('blur', pause);
-
-  // --- dotyk: przesunięcie = kierunek (bez odrywania palca), stuknięcie = stop
-  const SWIPE = 14;
-  let ox = 0, oy = 0, swiped = false, downAt = 0, activeId = null;
-  const app = document.getElementById('app');
-  app.addEventListener('pointerdown', e => {
-    e.preventDefault();
-    if (mode !== 'run') { tapOverlay(); activeId = null; return; }
-    activeId = e.pointerId; ox = e.clientX; oy = e.clientY; swiped = false; downAt = e.timeStamp;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && scr === 'game' && role === 'solo' && g && g.state === 'play') paused = true;
   });
-  app.addEventListener('pointermove', e => {
-    if (e.pointerId !== activeId || mode !== 'run') return;
-    e.preventDefault();
+
+  // --- dotyk: przesunięcie = kierunek (bez odrywania palca), stuknięcie = stop / przycisk ---
+  const SWIPE = 14;
+  let ox = 0, oy = 0, swiped = false, downAt = 0, activeId = null, downV = null;
+  function toV(e) {
+    const r = cv.getBoundingClientRect();
+    return { x: (e.clientX - r.left) / r.width * W, y: (e.clientY - r.top) / r.height * H };
+  }
+  const hit = (b, p) => p.x >= b.x && p.x < b.x + b.w && p.y >= b.y && p.y < b.y + b.h;
+  function screenTap() {
+    if (scr === 'msg') { if (performance.now() - stateAt > 500) toMenu(); }
+    else if (scr === 'game' && g) {
+      if (paused) paused = false;
+      else if (g.state === 'over' || g.state === 'round') goOn();
+      else input('stop');
+    }
+  }
+  document.addEventListener('pointerdown', e => {
+    unlockAudio();
+    activeId = e.pointerId; ox = e.clientX; oy = e.clientY; swiped = false; downAt = e.timeStamp; downV = toV(e);
+  });
+  document.addEventListener('pointermove', e => {
+    if (e.pointerId !== activeId) return;
     const dx = e.clientX - ox, dy = e.clientY - oy;
     if (Math.max(Math.abs(dx), Math.abs(dy)) < SWIPE) return;
-    setWant(g, ME, Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up'));
-    ox = e.clientX; oy = e.clientY; swiped = true;
+    swiped = true; ox = e.clientX; oy = e.clientY;
+    if (scr === 'game') input(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up'));
   });
-  const up = e => {
+  document.addEventListener('pointerup', e => {
     if (e.pointerId !== activeId) return;
     activeId = null;
-    if (!swiped && e.timeStamp - downAt < 300 && mode === 'run') setWant(g, ME, 'stop');
-  };
-  app.addEventListener('pointerup', up);
-  app.addEventListener('pointercancel', () => { activeId = null; });
-  // iOS: blokada przewijania, lupy i powiększania
+    if (swiped || e.timeStamp - downAt > 500) return;
+    const up = toV(e), b = btns.find(b => hit(b, downV) && hit(b, up));
+    if (b) { beep(SFX.click); b.fn(); } else screenTap();
+  });
+  document.addEventListener('pointercancel', () => { activeId = null; });
   ['touchstart', 'touchmove', 'gesturestart', 'contextmenu'].forEach(n =>
     document.addEventListener(n, e => e.preventDefault(), { passive: false }));
 
-  // klawiatura (do testów na komputerze)
+  // klawiatura (komputer)
   const KEYS = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
                  w: 'up', s: 'down', a: 'left', d: 'right', ' ': 'stop' };
   window.addEventListener('keydown', e => {
-    if (e.key === 'Escape' || e.key === 'p') { pause(); return; }
-    if (mode !== 'run') { if (e.key === 'Enter' || e.key === ' ') tapOverlay(); return; }
-    const k = KEYS[e.key]; if (k) { setWant(g, ME, k); e.preventDefault(); }
+    unlockAudio();
+    if (scr === 'menu') {
+      if (e.key === '1') startSolo(); else if (e.key === '2') hostGame('coop');
+      else if (e.key === '3') hostGame('versus'); else if (e.key === '4') { entry = ''; scr = 'join'; }
+    } else if (scr === 'join') {
+      if (/^[0-9]$/.test(e.key)) keyIn(e.key); else if (e.key === 'Backspace') keyIn('<');
+      else if (e.key === 'Enter') keyIn('OK'); else if (e.key === 'Escape') toMenu();
+    } else if (scr === 'game') {
+      if (e.key === 'Escape') quitOpen = !quitOpen;
+      else if (e.key === 'Enter') screenTap();
+      else if (KEYS[e.key]) { if (g && g.state !== 'play') screenTap(); else input(KEYS[e.key]); e.preventDefault(); }
+    } else if (e.key === 'Escape' || e.key === 'Enter') { if (scr === 'msg') screenTap(); else toMenu(); }
   });
 
-  resize(); hud();
+  window.XONIX = { get scr() { return scr; }, get g() { return g; }, get code() { return code; }, get role() { return role; } };
+
+  demo = makeDemo();
+  resize();
   requestAnimationFrame(frame);
+
+  // link z kodem: od razu dołączamy do gry
+  try {
+    const k = new URLSearchParams(location.search).get('kod');
+    if (k && /^\d{4}$/.test(k)) { history.replaceState(null, '', location.pathname); joinGame(k); }
+  } catch (e) {}
 })();
 </script>
 </body>
