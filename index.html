@@ -369,25 +369,72 @@ function unsnap(s, old) {
     return d;
   }
 
-  // --- sieć (PeerJS: bezpośrednie połączenie dwóch telefonów) ---
-  const PEER_SRC = 'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js';
-  const ROOM = 'xonix-capri-lava-';
-  let peer = null, conn = null, code = '', netMsg = '', pendMode = 'coop';
+  // --- sieć: oba telefony łączą się z serwerem pośredniczącym (MQTT przez WebSocket),
+  // więc działa to także w sieci komórkowej, gdzie połączenie bezpośrednie bywa blokowane.
+  // Pierwsza cyfra kodu gry wskazuje serwer.
+  const BROKERS = window.XONIX_BROKERS || ['wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt',
+                                           'wss://test.mosquitto.org:8081/mqtt'];
+  const TOPIC = 'xonix-capri-lava/v1/';
+  let link = null, topicOut = '', myId = '', guestId = null, code = '', netMsg = '', pendMode = 'coop';
   let lastRx = 0, lastPing = 0, snapAt = 0, netTimer = 0;
 
-  function loadPeer() {
-    return new Promise((res, rej) => {
-      if (window.Peer) return res();
-      const s = document.createElement('script');
-      s.src = PEER_SRC; s.onload = () => window.Peer ? res() : rej(); s.onerror = rej;
-      document.head.appendChild(s);
-    });
+  // minimalny klient MQTT 3.1.1 (QoS 0): jedno subskrybowane źródło, wiadomości JSON
+  function mqttOpen(url, subTopic, onMsg, onUp, onDown) {
+    const enc = new TextEncoder(), dec = new TextDecoder();
+    let ws = null, buf = new Uint8Array(0), up = false, dead = false, ping = 0;
+    const str = s => { const b = enc.encode(s), o = new Uint8Array(b.length + 2); o[0] = b.length >> 8; o[1] = b.length & 255; o.set(b, 2); return o; };
+    const pkt = (type, ...parts) => {
+      let n = 0; for (const p of parts) n += p.length;
+      const len = []; let x = n;
+      do { let d = x % 128; x = Math.floor(x / 128); if (x > 0) d |= 128; len.push(d); } while (x > 0);
+      const o = new Uint8Array(1 + len.length + n); o[0] = type; o.set(len, 1);
+      let k = 1 + len.length; for (const p of parts) { o.set(p, k); k += p.length; }
+      return o;
+    };
+    const down = () => { if (dead) return; dead = true; clearInterval(ping); try { ws.close(); } catch (e) {} onDown(up); };
+    try { ws = new WebSocket(url, 'mqtt'); } catch (e) { setTimeout(down, 0); }
+    if (ws) {
+      ws.binaryType = 'arraybuffer';
+      ws.onopen = () => ws.send(pkt(0x10, str('MQTT'), new Uint8Array([4, 2, 0, 60]), str('xnx' + Math.random().toString(36).slice(2, 12))));
+      ws.onmessage = e => {
+        const d = new Uint8Array(e.data), nb = new Uint8Array(buf.length + d.length);
+        nb.set(buf); nb.set(d, buf.length); buf = nb;
+        for (;;) {
+          if (dead || buf.length < 2) return;
+          let n = 0, m = 1, k = 1, b;
+          do { if (k >= buf.length) return; b = buf[k++]; n += (b & 127) * m; m *= 128; } while (b & 128);
+          if (buf.length < k + n) return;
+          const type = buf[0] >> 4, body = buf.slice(k, k + n);
+          buf = buf.slice(k + n);
+          if (type === 2) {                       // CONNACK -> SUBSCRIBE
+            if (body[1] !== 0) { down(); return; }
+            ws.send(pkt(0x82, new Uint8Array([0, 1]), str(subTopic), new Uint8Array([0])));
+          } else if (type === 9) { up = true; onUp(); }   // SUBACK
+          else if (type === 3) {                  // PUBLISH
+            const tl = (body[0] << 8) | body[1]; let msg = null;
+            try { msg = JSON.parse(dec.decode(body.subarray(2 + tl))); } catch (x) {}
+            if (msg) onMsg(msg);
+          }
+        }
+      };
+      ws.onclose = ws.onerror = down;
+      ping = setInterval(() => { if (ws.readyState === 1) ws.send(new Uint8Array([0xC0, 0])); }, 20000);
+    }
+    return {
+      get up() { return up && !dead && ws && ws.readyState === 1; },
+      send(topic, obj) { if (this.up) ws.send(pkt(0x30, str(topic), enc.encode(JSON.stringify(obj)))); },
+      close() {
+        if (dead) return; dead = true; clearInterval(ping);
+        try { if (ws.readyState === 1) ws.send(new Uint8Array([0xE0, 0])); ws.close(); } catch (e) {}
+      }
+    };
   }
+
+  function tx(obj) { if (link) link.send(topicOut, role === 'guest' ? Object.assign(obj, { id: myId }) : obj); }
   function netClose() {
     clearTimeout(netTimer);
-    try { if (conn) conn.close(); } catch (e) {}
-    try { if (peer) peer.destroy(); } catch (e) {}
-    conn = null; peer = null;
+    if (link) { tx({ t: 'bye' }); link.close(); }
+    link = null; guestId = null;
   }
   function toMenu() { netClose(); role = 'solo'; ME = 0; g = null; scr = 'menu'; quitOpen = paused = false; }
   function fail(lines) { netClose(); role = 'solo'; ME = 0; g = null; msg = lines; scr = 'msg'; stateAt = performance.now(); }
@@ -395,62 +442,60 @@ function unsnap(s, old) {
 
   function hostGame(mode) {
     netClose(); role = 'host'; ME = 0; pendMode = mode; code = ''; netMsg = 'ŁĄCZĘ Z SERWEREM'; scr = 'host';
-    loadPeer().then(() => openHost(0)).catch(() => { if (scr === 'host') fail(['BRAK POŁĄCZENIA', 'Z INTERNETEM']); });
+    tryHost(0);
   }
-  function openHost(tries) {
+  function tryHost(bi) {
     if (scr !== 'host') return;
-    const c = String(1000 + Math.floor(Math.random() * 9000));
-    const my = peer = new Peer(ROOM + c);
-    my.on('open', () => { if (peer === my) { code = c; netMsg = 'CZEKAM NA GRACZA'; } });
-    my.on('connection', cn => {
-      if (conn || scr !== 'host') { try { cn.close(); } catch (e) {} return; }
-      conn = cn;
-      const go = () => {
-        if (conn !== cn || scr !== 'host') return;
-        g = newGame(pendMode, 2); scr = 'game'; enterGame(); lastRx = performance.now();
-      };
-      cn.on('open', go);
-      cn.on('data', m => {
-        if (conn !== cn || !m) return;
+    if (bi >= BROKERS.length) { fail(['BRAK POŁĄCZENIA', 'Z SERWEREM GRY']); return; }
+    const c = String(bi + 1) + String(Math.floor(Math.random() * 1000)).padStart(3, '0');
+    let my = null;
+    clearTimeout(netTimer);
+    netTimer = setTimeout(() => { if (my && link === my && !my.up) { my.close(); link = null; tryHost(bi + 1); } }, 6000);
+    my = link = mqttOpen(BROKERS[bi], TOPIC + c + '/g',
+      m => {
+        if (link !== my) return;
+        if (m.t === 'hello' && scr === 'host' && !guestId && m.id) {
+          guestId = m.id; g = newGame(pendMode, 2); scr = 'game'; enterGame(); lastRx = performance.now(); return;
+        }
+        if (!guestId || m.id !== guestId) return;
         lastRx = performance.now();
         if (m.t === 'i' && g) setWant(g, 1, m.d);
         else if (m.t === 'go') proceed();
+        else if (m.t === 'bye') lost();
+      },
+      () => { if (link === my) { clearTimeout(netTimer); code = c; topicOut = TOPIC + c + '/h'; netMsg = 'CZEKAM NA GRACZA'; } },
+      wasUp => {
+        if (link !== my) return;
+        link = null;
+        if (!wasUp) { clearTimeout(netTimer); tryHost(bi + 1); }
+        else if (scr === 'host') fail(['BŁĄD POŁĄCZENIA', 'SPRÓBUJ PONOWNIE']);
+        else lost();
       });
-      cn.on('close', () => { if (conn === cn) lost(); });
-      if (cn.open) go();
-    });
-    my.on('error', e => {
-      if (peer !== my) return;
-      if (e && e.type === 'unavailable-id' && tries < 5) { try { my.destroy(); } catch (x) {} openHost(tries + 1); }
-      else if (scr === 'host') fail(['BŁĄD POŁĄCZENIA', 'SPRÓBUJ PONOWNIE']);
-    });
-    my.on('disconnected', () => { if (peer === my && !my.destroyed) try { my.reconnect(); } catch (e) {} });
   }
 
   function joinGame(c) {
-    netClose(); role = 'guest'; ME = 1; code = c; netMsg = 'ŁĄCZĘ Z GRĄ ' + c; scr = 'wait';
-    loadPeer().then(() => {
-      if (scr !== 'wait') return;
-      const my = peer = new Peer();
-      my.on('open', () => {
-        if (peer !== my) return;
-        const cn = conn = my.connect(ROOM + c, { reliable: true });
-        cn.on('open', () => { lastRx = performance.now(); });
-        cn.on('data', m => {
-          if (conn !== cn || !m || m.t !== 's') return;
-          lastRx = performance.now();
-          g = unsnap(m, g); snapAt = lastRx;
-          if (scr === 'wait') { clearTimeout(netTimer); scr = 'game'; enterGame(); }
-          after();
-        });
-        cn.on('close', () => { if (conn === cn) lost(); });
+    netClose(); role = 'guest'; ME = 1; code = c; netMsg = 'ŁĄCZĘ Z GRĄ ' + c; scr = 'wait'; g = null;
+    const bi = +c[0] - 1;
+    if (!(bi >= 0 && bi < BROKERS.length)) { fail(['NIE MA GRY', 'O KODZIE ' + c]); return; }
+    myId = Math.random().toString(36).slice(2, 10); topicOut = TOPIC + c + '/g';
+    let my = null;
+    my = link = mqttOpen(BROKERS[bi], TOPIC + c + '/h',
+      m => {
+        if (link !== my) return;
+        if (m.t === 'bye') { lost(); return; }
+        if (m.t !== 's') return;
+        lastRx = performance.now();
+        g = unsnap(m, g); snapAt = lastRx;
+        if (scr === 'wait') { clearTimeout(netTimer); scr = 'game'; enterGame(); }
+        after();
+      },
+      () => {},
+      () => {
+        if (link !== my) return;
+        link = null;
+        if (scr === 'wait') fail(['BŁĄD POŁĄCZENIA', 'SPRÓBUJ PONOWNIE']); else lost();
       });
-      my.on('error', e => {
-        if (peer !== my || scr !== 'wait') return;
-        fail(e && e.type === 'peer-unavailable' ? ['NIE MA GRY', 'O KODZIE ' + c] : ['BŁĄD POŁĄCZENIA', 'SPRÓBUJ PONOWNIE']);
-      });
-      netTimer = setTimeout(() => { if (scr === 'wait') fail(['NIE UDAŁO SIĘ', 'POŁĄCZYĆ']); }, 20000);
-    }).catch(() => { if (scr === 'wait') fail(['BRAK POŁĄCZENIA', 'Z INTERNETEM']); });
+    netTimer = setTimeout(() => { if (scr === 'wait') fail(['NIE MA GRY', 'O KODZIE ' + c]); }, 12000);
   }
 
   function shareLink() {
@@ -490,12 +535,12 @@ function unsnap(s, old) {
     else if (g.state === 'round') { nextRound(g); enterGame(); }
   }
   function goOn() {
-    if (role === 'guest') { if (conn && conn.open && performance.now() - stateAt > 800) conn.send({ t: 'go' }); }
+    if (role === 'guest') { if (performance.now() - stateAt > 800) tx({ t: 'go' }); }
     else proceed();
   }
   function input(d) {
     if (!g || g.state !== 'play' || quitOpen || paused) return;
-    if (role === 'guest') { if (conn && conn.open) conn.send({ t: 'i', d }); }
+    if (role === 'guest') tx({ t: 'i', d });
     else setWant(g, ME, d);
   }
 
@@ -670,20 +715,21 @@ function unsnap(s, old) {
     if (scr === 'game' && g) {
       if (role === 'guest') {
         alpha = Math.min(1, (now - snapAt) / TICK_MS);
-        if (now - lastPing > 1000 && conn && conn.open) { conn.send({ t: 'p' }); lastPing = now; }
+        if (now - lastPing > 1000) { tx({ t: 'p' }); lastPing = now; }
       } else {
         const frozen = role === 'solo' && (quitOpen || paused);
         if (!frozen) {
           acc += dt;
           while (acc >= TICK_MS) {
             acc -= TICK_MS; step(g); after();
-            if (role === 'host' && conn && conn.open) conn.send(snap(g));
+            if (role === 'host') tx(snap(g));
           }
         }
         alpha = !frozen && g.state === 'play' ? acc / TICK_MS : 1;
       }
       if (role !== 'solo' && now - lastRx > 10000) lost();
     } else {
+      if (scr === 'wait' && now - lastPing > 500) { tx({ t: 'hello' }); lastPing = now; }
       dacc += dt;
       while (dacc >= TICK_MS) { dacc -= TICK_MS; step(demo); }
       alpha = dacc / TICK_MS;
