@@ -249,7 +249,7 @@ function unsnap(s, old) {
 // paleta EGA, dźwięk jak z głośniczka PC.
 // ---------------------------------------------------------------------------
 (function () {
-  const VERSION = 4;
+  const VERSION = 5;
   const W = 180, H = 330, CELL = 5, Y0 = 18;
   const C = { black: '#000000', cyan: '#00AAAA', lcyan: '#55FFFF', white: '#FFFFFF', gray: '#AAAAAA',
               dgray: '#555555', red: '#FF5555', dred: '#AA0000', yellow: '#FFFF55',
@@ -717,32 +717,35 @@ function unsnap(s, old) {
     else drawMenu();
   }
 
-  function frame(t) {
-    requestAnimationFrame(frame);
-    const dt = Math.min(250, t - (last || t)); last = t;
+  // Logika i sieć chodzą na zegarze (działa też, gdy przeglądarka wstrzyma rysowanie);
+  // rysowanie osobno, w rytmie odświeżania ekranu.
+  function tick() {
     const now = performance.now();
+    const dt = Math.min(250, now - (last || now)); last = now;
     if (scr === 'game' && g) {
       if (role === 'guest') {
-        alpha = Math.min(1, (now - snapAt) / TICK_MS);
         if (now - lastPing > 1000) { tx({ t: 'p' }); lastPing = now; }
-      } else {
-        const frozen = role === 'solo' && (quitOpen || paused);
-        if (!frozen) {
-          acc += dt;
-          while (acc >= TICK_MS) {
-            acc -= TICK_MS; step(g); after();
-            if (role === 'host') tx(snap(g));
-          }
+      } else if (!(role === 'solo' && (quitOpen || paused))) {
+        acc += dt;
+        while (acc >= TICK_MS) {
+          acc -= TICK_MS; step(g); after();
+          if (role === 'host') tx(snap(g));
         }
-        alpha = !frozen && g.state === 'play' ? acc / TICK_MS : 1;
       }
       if (role !== 'solo' && now - lastRx > 15000) lost();
     } else {
       if (scr === 'wait' && now - lastPing > 500) { tx({ t: 'hello' }); lastPing = now; }
       dacc += dt;
       while (dacc >= TICK_MS) { dacc -= TICK_MS; step(demo); }
-      alpha = dacc / TICK_MS;
     }
+  }
+  function frame() {
+    requestAnimationFrame(frame);
+    const now = performance.now(), since = Math.min(TICK_MS, now - last);
+    if (scr === 'game' && g) {
+      if (role === 'guest') alpha = Math.min(1, (now - snapAt) / TICK_MS);
+      else alpha = g.state === 'play' && !(role === 'solo' && (quitOpen || paused)) ? Math.min(1, (acc + since) / TICK_MS) : 1;
+    } else alpha = Math.min(1, (dacc + since) / TICK_MS);
     if (flash > 0) flash--;
     draw();
   }
@@ -815,6 +818,7 @@ function unsnap(s, old) {
 
   demo = makeDemo();
   resize();
+  setInterval(tick, 20);
   requestAnimationFrame(frame);
 
   // jeśli na serwerze jest nowsza wersja niż ta z pamięci telefonu, wczytaj ją
