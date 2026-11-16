@@ -249,6 +249,7 @@ function unsnap(s, old) {
 // paleta EGA, dźwięk jak z głośniczka PC.
 // ---------------------------------------------------------------------------
 (function () {
+  const VERSION = 4;
   const W = 180, H = 330, CELL = 5, Y0 = 18;
   const C = { black: '#000000', cyan: '#00AAAA', lcyan: '#55FFFF', white: '#FFFFFF', gray: '#AAAAAA',
               dgray: '#555555', red: '#FF5555', dred: '#AA0000', yellow: '#FFFF55',
@@ -372,10 +373,10 @@ function unsnap(s, old) {
   // --- sieć: oba telefony łączą się z serwerem pośredniczącym (MQTT przez WebSocket),
   // więc działa to także w sieci komórkowej, gdzie połączenie bezpośrednie bywa blokowane.
   // Pierwsza cyfra kodu gry wskazuje serwer.
-  const BROKERS = window.XONIX_BROKERS || ['wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt',
-                                           'wss://test.mosquitto.org:8081/mqtt'];
+  const BROKERS = window.XONIX_BROKERS || ['wss://broker.hivemq.com:8884/mqtt', 'wss://test.mosquitto.org:8081/mqtt',
+                                           'wss://broker.emqx.io:8084/mqtt'];
   const TOPIC = 'xonix-capri-lava/v1/';
-  let link = null, topicOut = '', myId = '', guestId = null, code = '', netMsg = '', pendMode = 'coop';
+  let myId = '', guestId = null, code = '', netMsg = '', pendMode = 'coop';
   let lastRx = 0, lastPing = 0, snapAt = 0, netTimer = 0;
 
   // minimalny klient MQTT 3.1.1 (QoS 0): jedno subskrybowane źródło, wiadomości JSON
@@ -430,11 +431,32 @@ function unsnap(s, old) {
     };
   }
 
-  function tx(obj) { if (link) link.send(topicOut, role === 'guest' ? Object.assign(obj, { id: myId }) : obj); }
+  // sesja sieciowa: po zerwaniu łącza (np. telefon na chwilę w tle) łączy się ponownie sama
+  let net = null;
+  function openLink(s) {
+    clearTimeout(s.timer);
+    const down = () => {
+      if (net !== s) return;
+      try { s.cl.close(); } catch (e) {}
+      if (s.everUp) s.timer = setTimeout(() => { if (net === s) openLink(s); }, 800);
+      else s.onFail();
+    };
+    const cl = s.cl = mqttOpen(BROKERS[s.bi], s.sub,
+      m => { if (net === s && s.cl === cl) s.onMsg(m); },
+      () => {
+        if (net !== s || s.cl !== cl) return;
+        clearTimeout(s.timer);
+        const first = !s.everUp; s.everUp = true;
+        if (first && s.onUp) s.onUp();
+      },
+      () => { if (s.cl === cl) down(); });
+    s.timer = setTimeout(() => { if (net === s && s.cl === cl && !cl.up) down(); }, 7000);
+  }
+  function tx(obj) { if (net && net.cl) net.cl.send(net.out, role === 'guest' ? Object.assign(obj, { id: myId }) : obj); }
   function netClose() {
     clearTimeout(netTimer);
-    if (link) { tx({ t: 'bye' }); link.close(); }
-    link = null; guestId = null;
+    if (net) { tx({ t: 'bye' }); const s = net; net = null; clearTimeout(s.timer); try { s.cl.close(); } catch (e) {} }
+    guestId = null;
   }
   function toMenu() { netClose(); role = 'solo'; ME = 0; g = null; scr = 'menu'; quitOpen = paused = false; }
   function fail(lines) { netClose(); role = 'solo'; ME = 0; g = null; msg = lines; scr = 'msg'; stateAt = performance.now(); }
@@ -448,12 +470,8 @@ function unsnap(s, old) {
     if (scr !== 'host') return;
     if (bi >= BROKERS.length) { fail(['BRAK POŁĄCZENIA', 'Z SERWEREM GRY']); return; }
     const c = String(bi + 1) + String(Math.floor(Math.random() * 1000)).padStart(3, '0');
-    let my = null;
-    clearTimeout(netTimer);
-    netTimer = setTimeout(() => { if (my && link === my && !my.up) { my.close(); link = null; tryHost(bi + 1); } }, 6000);
-    my = link = mqttOpen(BROKERS[bi], TOPIC + c + '/g',
-      m => {
-        if (link !== my) return;
+    const s = net = { bi, sub: TOPIC + c + '/g', out: TOPIC + c + '/h', everUp: false,
+      onMsg: m => {
         if (m.t === 'hello' && scr === 'host' && !guestId && m.id) {
           guestId = m.id; g = newGame(pendMode, 2); scr = 'game'; enterGame(); lastRx = performance.now(); return;
         }
@@ -463,25 +481,18 @@ function unsnap(s, old) {
         else if (m.t === 'go') proceed();
         else if (m.t === 'bye') lost();
       },
-      () => { if (link === my) { clearTimeout(netTimer); code = c; topicOut = TOPIC + c + '/h'; netMsg = 'CZEKAM NA GRACZA'; } },
-      wasUp => {
-        if (link !== my) return;
-        link = null;
-        if (!wasUp) { clearTimeout(netTimer); tryHost(bi + 1); }
-        else if (scr === 'host') fail(['BŁĄD POŁĄCZENIA', 'SPRÓBUJ PONOWNIE']);
-        else lost();
-      });
+      onUp: () => { code = c; netMsg = 'CZEKAM NA GRACZA'; },
+      onFail: () => { if (net === s) { net = null; tryHost(bi + 1); } } };
+    openLink(s);
   }
 
   function joinGame(c) {
-    netClose(); role = 'guest'; ME = 1; code = c; netMsg = 'ŁĄCZĘ Z GRĄ ' + c; scr = 'wait'; g = null;
+    netClose(); role = 'guest'; ME = 1; code = c; netMsg = 'ŁĄCZĘ Z SERWEREM'; scr = 'wait'; g = null;
     const bi = +c[0] - 1;
     if (!(bi >= 0 && bi < BROKERS.length)) { fail(['NIE MA GRY', 'O KODZIE ' + c]); return; }
-    myId = Math.random().toString(36).slice(2, 10); topicOut = TOPIC + c + '/g';
-    let my = null;
-    my = link = mqttOpen(BROKERS[bi], TOPIC + c + '/h',
-      m => {
-        if (link !== my) return;
+    myId = Math.random().toString(36).slice(2, 10);
+    net = { bi, sub: TOPIC + c + '/h', out: TOPIC + c + '/g', everUp: false,
+      onMsg: m => {
         if (m.t === 'bye') { lost(); return; }
         if (m.t !== 's') return;
         lastRx = performance.now();
@@ -489,13 +500,10 @@ function unsnap(s, old) {
         if (scr === 'wait') { clearTimeout(netTimer); scr = 'game'; enterGame(); }
         after();
       },
-      () => {},
-      () => {
-        if (link !== my) return;
-        link = null;
-        if (scr === 'wait') fail(['BŁĄD POŁĄCZENIA', 'SPRÓBUJ PONOWNIE']); else lost();
-      });
-    netTimer = setTimeout(() => { if (scr === 'wait') fail(['NIE MA GRY', 'O KODZIE ' + c]); }, 12000);
+      onUp: () => { netMsg = 'SZUKAM GRY ' + c; },
+      onFail: () => fail(['BRAK POŁĄCZENIA', 'Z SERWEREM GRY']) };
+    openLink(net);
+    netTimer = setTimeout(() => { if (scr === 'wait') fail(['NIE MA GRY', 'O KODZIE ' + c]); }, 30000);
   }
 
   function shareLink() {
@@ -631,6 +639,7 @@ function unsnap(s, old) {
 
   function drawMenu() {
     ctext('WYBIERZ TRYB GRY', 5, C.lcyan);
+    rtext('W.' + VERSION, W - 2, 5, C.dgray);
     drawBoard(demo, alpha);
     button('1. JEDEN GRACZ', 10, 106, 160, 18, startSolo, C.white, true);
     button('2. WE DWÓCH: RAZEM', 10, 128, 160, 18, () => hostGame('coop'), C.white, true);
@@ -727,7 +736,7 @@ function unsnap(s, old) {
         }
         alpha = !frozen && g.state === 'play' ? acc / TICK_MS : 1;
       }
-      if (role !== 'solo' && now - lastRx > 10000) lost();
+      if (role !== 'solo' && now - lastRx > 15000) lost();
     } else {
       if (scr === 'wait' && now - lastPing > 500) { tx({ t: 'hello' }); lastPing = now; }
       dacc += dt;
@@ -740,6 +749,10 @@ function unsnap(s, old) {
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden && scr === 'game' && role === 'solo' && g && g.state === 'play') paused = true;
+    if (!document.hidden && net) {             // powrót z tła: odśwież łącze i daj chwilę na wznowienie
+      lastRx = performance.now();
+      if (net.everUp && !net.cl.up) { try { net.cl.close(); } catch (e) {} openLink(net); }
+    }
   });
 
   // --- dotyk: przesunięcie = kierunek (bez odrywania palca), stuknięcie = stop / przycisk ---
@@ -804,9 +817,20 @@ function unsnap(s, old) {
   resize();
   requestAnimationFrame(frame);
 
+  // jeśli na serwerze jest nowsza wersja niż ta z pamięci telefonu, wczytaj ją
+  const query = new URLSearchParams(location.search);
+  try {
+    fetch(location.pathname + '?t=' + Date.now(), { cache: 'no-store' }).then(r => r.text()).then(t => {
+      const m = /const VERSION = (\d+);/.exec(t);
+      if (m && +m[1] > VERSION && query.get('v') !== m[1] && scr !== 'game') {
+        query.set('v', m[1]); location.replace(location.pathname + '?' + query);
+      }
+    }).catch(() => {});
+  } catch (e) {}
+
   // link z kodem: od razu dołączamy do gry
   try {
-    const k = new URLSearchParams(location.search).get('kod');
+    const k = query.get('kod');
     if (k && /^\d{4}$/.test(k)) { history.replaceState(null, '', location.pathname); joinGame(k); }
   } catch (e) {}
 })();
