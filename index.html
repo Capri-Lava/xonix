@@ -249,7 +249,7 @@ function unsnap(s, old) {
 // paleta EGA, dźwięk jak z głośniczka PC.
 // ---------------------------------------------------------------------------
 (function () {
-  const VERSION = 5;
+  const VERSION = 6;
   const W = 180, H = 330, CELL = 5, Y0 = 18;
   const C = { black: '#000000', cyan: '#00AAAA', lcyan: '#55FFFF', white: '#FFFFFF', gray: '#AAAAAA',
               dgray: '#555555', red: '#FF5555', dred: '#AA0000', yellow: '#FFFF55',
@@ -353,7 +353,7 @@ function unsnap(s, old) {
   let acc = 0, dacc = 0, last = 0, alpha = 1, flash = 0;
   let paused = false, quitOpen = false;
   let lastState = 'play', lastFilled = 0, stateAt = 0, newRecord = false;
-  let msg = [], entry = '';
+  let msg = [], entry = '', goPend = false, lastGo = 0;
   let best = { solo: 0, coop: 0 };
   try { best.solo = +localStorage.getItem('xonix.best') || 0; best.coop = +localStorage.getItem('xonix.best.coop') || 0; } catch (e) {}
 
@@ -525,7 +525,7 @@ function unsnap(s, old) {
     if (g.filled > lastFilled) beep(SFX.fill);
     lastFilled = g.filled;
     if (g.state !== lastState) {
-      stateAt = performance.now();
+      stateAt = performance.now(); goPend = false;
       if (g.state === 'levelup') beep(SFX.win);
       if (g.state === 'round') beep(g.winner === ME ? SFX.win : SFX.over);
       if (g.state === 'over') {
@@ -543,7 +543,7 @@ function unsnap(s, old) {
     else if (g.state === 'round') { nextRound(g); enterGame(); }
   }
   function goOn() {
-    if (role === 'guest') { if (performance.now() - stateAt > 800) tx({ t: 'go' }); }
+    if (role === 'guest') { if (performance.now() - stateAt > 800) { goPend = true; lastGo = performance.now(); tx({ t: 'go' }); } }
     else proceed();
   }
   function input(d) {
@@ -622,8 +622,9 @@ function unsnap(s, old) {
       ctext('KONIEC GRY', 114, C.red, 2);
       ctext('WYNIK  ' + pad(g.score, 6), 142, C.white);
       ctext(newRecord ? 'NOWY REKORD!' : 'REKORD ' + pad(best[k], 6), 156, newRecord ? C.yellow : C.gray);
-      if (blink()) ctext('DOTKNIJ = JESZCZE RAZ', 176, C.yellow);
-      button('MENU', 60, 194, 60, 20, toMenu);
+      if (goPend) { if (blink()) ctext('CZEKAM NA GRACZA', 176, C.yellow); }
+      button(role === 'solo' ? 'JESZCZE RAZ' : 'NASTĘPNA GRA', 22, 194, 88, 20, goOn, C.yellow);
+      button('MENU', 114, 194, 46, 20, () => { quitOpen = true; });
     } else if (g.state === 'round') {
       const pct = v => Math.floor(v / g.seaTotal * 100);
       dbox(10, 92, 160, 140);
@@ -632,8 +633,9 @@ function unsnap(s, old) {
       if (g.winner >= 0) ctext('RUNDA DLA: ' + NAME[g.winner], 132, C.player[g.winner]);
       ctext('TEREN  ' + pct(g.area[0]) + '% : ' + pct(g.area[1]) + '%', 146, C.white);
       ctext('MECZ   ' + g.wins[0] + ' : ' + g.wins[1], 160, C.white);
-      if (blink()) ctext('DOTKNIJ = NASTĘPNA RUNDA', 180, C.yellow);
-      button('MENU', 60, 200, 60, 20, toMenu);
+      if (goPend && blink()) ctext('CZEKAM NA GRACZA', 180, C.yellow);
+      button('NASTĘPNA RUNDA', 16, 200, 94, 20, goOn, C.yellow);
+      button('MENU', 114, 200, 50, 20, () => { quitOpen = true; });
     }
   }
 
@@ -725,6 +727,8 @@ function unsnap(s, old) {
     if (scr === 'game' && g) {
       if (role === 'guest') {
         if (now - lastPing > 1000) { tx({ t: 'p' }); lastPing = now; }
+        // „następna gra” mogła zginąć po drodze: ponawiamy, aż gospodarz ją zacznie
+        if (goPend && g && (g.state === 'over' || g.state === 'round') && now - lastGo > 600) { tx({ t: 'go' }); lastGo = now; }
       } else if (!(role === 'solo' && (quitOpen || paused))) {
         acc += dt;
         while (acc >= TICK_MS) {
